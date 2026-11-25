@@ -6,12 +6,10 @@ import { getCustomCappellaAvatar } from '../services/cappellaAvatarPack';
 import { getMonetBackgroundImage } from '../services/monetBackgroundImage';
 import { getMonetPortraitImage } from '../services/monetPortraitImage';
 import { restoreUploadedLyricsFont } from '../services/customLyricsFont';
-import {
-    resolveStoredCappellaTuning,
-    resolveStoredMonetBackgroundTuning,
-    resolveStoredMonetTuning,
-    resolveVisualizerBackgroundMode,
-} from '../stores/visualizerSettingsPersistence';
+import { resolveStoredCappellaTuning } from '../components/visualizer/cappella/tuning';
+import { resolveStoredMonetBackgroundTuning } from '../components/visualizer/backgrounds/monet/tuning';
+import { resolveStoredMonetTuning } from '../components/visualizer/monet/tuning';
+import { resolveVisualizerBackgroundMode } from '../stores/visualizerSettingsPersistence';
 import i18n from '../i18n/config';
 import { setStatusMessage } from '../stores/useStatusMessageStore';
 import { createSafeObjectUrl } from '../utils/blobGuards';
@@ -154,6 +152,14 @@ export function useAppPreferences() {
     }, [setDesktopPreferenceSnapshot]);
 
     useEffect(() => {
+        // The community mods switch was changed, maybe in another window (the remote-control window runs this app
+        // too): the main process tells every one of them, so none keeps showing the old value until a restart.
+        return window.electron?.mods?.onCommunityModsChanged?.(({ enabled }) => {
+            if (typeof enabled === 'boolean') setDesktopPreferenceSnapshot({ MOD_COMMUNITY_ENABLED: enabled });
+        });
+    }, [setDesktopPreferenceSnapshot]);
+
+    useEffect(() => {
         // The tray asked to enter wallpaper mode. Tray lives in the main process and cannot show
         // the in-app dialog, so it goes through the same gated entry as the settings card.
         return window.electron?.onWallpaperEntryRequested?.(() => {
@@ -176,6 +182,17 @@ export function useAppPreferences() {
             setStatusMessage({
                 type: 'info',
                 text: i18n.t('notifications.macWallpaperInputMonitoringNeeded'),
+            });
+        });
+    }, []);
+
+    useEffect(() => {
+        // macOS wallpaper mode with Stage Manager on and the desktop icons shown: without the
+        // Accessibility grant a click on the wallpaper still sends the stage aside (issue #698).
+        return window.electron?.onWallpaperAccessibilitySuggested?.(() => {
+            setStatusMessage({
+                type: 'info',
+                text: i18n.t('notifications.macWallpaperAccessibilitySuggested'),
             });
         });
     }, []);

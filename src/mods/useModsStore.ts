@@ -1,7 +1,10 @@
 import { create } from 'zustand';
 import {
     cancelExport,
+    clearModCache,
     getFfmpegStatus,
+    getModStorageUsage,
+    installModFromPickedZip,
     installModFromZip,
     isModsBridgeAvailable,
     listMods,
@@ -12,9 +15,18 @@ import {
     subscribeModLogs,
     subscribeModsState,
 } from './ipc';
-import type { ModExportProgress, ModFfmpegStatus, ModLogEntry, ModRuntimeInfo, ModSetEnabledResult } from './types';
-import { reconcileFoliumClients } from './folium/clientLoader';
-import { restoreSavedFoliumSelections } from './folium/missingEntries';
+import type {
+    ModClearCacheResult,
+    ModExportProgress,
+    ModFfmpegStatus,
+    ModLogEntry,
+    ModRuntimeInfo,
+    ModSetEnabledResult,
+    ModStorageUsageResult,
+} from './types';
+import { reconcileFoliumClients } from './runtime/clientLoader';
+import { restoreSavedFoliumSelections } from './runtime/missingEntries';
+import { stopPlaybackOfSources } from './runtime/sourceSwitches';
 
 // src/mods/useModsStore.ts
 // Renderer-side state for the mod system panel. All mutations flow through the
@@ -23,11 +35,16 @@ import { restoreSavedFoliumSelections } from './folium/missingEntries';
 
 const MAX_LOG_ENTRIES = 50;
 
+/** The `data-settings-row` of a mod's row in the manager, so the settings window can land on it. */
+export const modSettingsRowId = (modId: string) => `mod:${modId}`;
+
 interface ModsStoreState {
     bridgeAvailable: boolean;
     mods: ModRuntimeInfo[];
     ffmpeg: ModFfmpegStatus;
     directories: string[];
+    /** This run of the app was started (or its window reopened) without mods; nothing is stored. */
+    startSkipped: boolean;
     selectedModId: string | null;
     exportProgress: ModExportProgress | null;
     logs: ModLogEntry[];
@@ -40,6 +57,10 @@ interface ModsStoreState {
     cancelActiveExport: () => Promise<void>;
     openModsDirectory: () => Promise<{ ok: boolean; directory?: string; error?: string }>;
     installModFromZip: (zipPath: string) => Promise<{ ok: boolean; id?: string; error?: string }>;
+    /** 「从 zip 安装音源模组」: the main process asks for the file. */
+    installModFromPickedZip: () => Promise<{ ok: boolean; id?: string; error?: string }>;
+    getModStorageUsage: (modId: string) => Promise<ModStorageUsageResult>;
+    clearModCache: (modId: string) => Promise<ModClearCacheResult>;
     bindEvents: () => void;
 }
 
@@ -48,6 +69,7 @@ export const useModsStore = create<ModsStoreState>((set, get) => ({
     mods: [],
     ffmpeg: { available: false, path: null, version: null, candidates: [] },
     directories: [],
+    startSkipped: false,
     selectedModId: null,
     exportProgress: null,
     logs: [],
@@ -55,17 +77,15 @@ export const useModsStore = create<ModsStoreState>((set, get) => ({
 
     refresh: async () => {
         const payload = await listMods();
-        set((state) => {
-            const selectedModId = state.selectedModId ?? payload.mods[0]?.id ?? null;
-            return {
-                mods: payload.mods,
-                ffmpeg: payload.ffmpeg,
-                directories: payload.directories,
-                selectedModId: payload.mods.some((mod) => mod.id === selectedModId)
-                    ? selectedModId
-                    : payload.mods[0]?.id ?? null,
-            };
-        });
+        // The chosen mod stays chosen while it is listed; nothing is chosen for the user (the mods view picks
+        // what it shows when wide, and shows the list when narrow).
+        set((state) => ({
+            mods: payload.mods,
+            ffmpeg: payload.ffmpeg,
+            directories: payload.directories,
+            startSkipped: payload.startSkipped,
+            selectedModId: payload.mods.some((mod) => mod.id === state.selectedModId) ? state.selectedModId : null,
+        }));
     },
 
     refreshFfmpeg: async () => {
@@ -83,6 +103,9 @@ export const useModsStore = create<ModsStoreState>((set, get) => ({
     // outcome the panel surfaces; the mod list is only replaced when the call
     // actually returned one (a declined confirmation returns the current list).
     toggleMod: async (modId, enabled) => {
+        // Folium 2.0 (plan §5.2): a source mod that is about to stop has its playing song stopped first.
+        const sourceIds = get().mods.find((mod) => mod.id === modId)?.sources?.map((source) => source.id) ?? [];
+        if (!enabled && sourceIds.length > 0) await stopPlaybackOfSources(sourceIds);
         const result = await setModEnabled(modId, enabled);
         if (result.mods.length > 0 || result.ok) {
             set({ mods: result.mods });
@@ -106,6 +129,19 @@ export const useModsStore = create<ModsStoreState>((set, get) => ({
         }
         return result;
     },
+
+    installModFromPickedZip: async () => {
+        const result = await installModFromPickedZip();
+        if (result.ok) {
+            await get().refresh();
+        }
+        return result;
+    },
+
+    // Asked for when a mod row expands, never kept here: counting walks the directories.
+    getModStorageUsage: (modId) => getModStorageUsage(modId),
+
+    clearModCache: (modId) => clearModCache(modId),
 
     bindEvents: () => {
         if (get().eventsBound) {

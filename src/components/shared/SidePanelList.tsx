@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Play, Plus } from 'lucide-react';
+import { X, Play, Plus, NotebookPen } from 'lucide-react';
 import { List as VirtualList } from 'react-window';
 import { useTranslation } from 'react-i18next';
 import { getSizedCoverUrl } from '../../utils/coverUrl';
@@ -16,6 +16,8 @@ export interface SidePanelListProps<T> {
     itemHeight: number;
     isDaylight: boolean;
     focusedIndex?: number;
+    /** A change of this number scrolls to the focused row again, though it is the row it was. */
+    revealTimes?: number;
     hideTitle?: boolean;
     headerLeadingActions?: React.ReactNode;
     headerActions?: React.ReactNode;
@@ -34,6 +36,7 @@ export function SidePanelList<T>({
     itemHeight,
     isDaylight,
     focusedIndex,
+    revealTimes,
     hideTitle = false,
     headerLeadingActions,
     headerActions,
@@ -92,7 +95,7 @@ export function SidePanelList<T>({
             } else if (!isOpen) {
                 lastScrollTargetRef.current = null;
             }
-    }, [isOpen, focusedIndex]);
+    }, [isOpen, focusedIndex, revealTimes]);
 
     return (
         <AnimatePresence>
@@ -162,10 +165,16 @@ export const TrackListItem = React.memo<{
     style: React.CSSProperties;
     onPlay: () => void;
     onAddToQueue?: () => void;
+    /** 收进速记簿（不动队列）；不给就没有这颗按钮。 */
+    onCollect?: () => void;
     isUnavailable?: boolean;
     isActive?: boolean;
     albumTrackLabel?: string | null;
-}>(({ track, index, style, onPlay, onAddToQueue, isUnavailable, isActive, albumTrackLabel }) => {
+    /** 这一首来自哪里（混合来源的歌单里才给），跟在歌手后面。 */
+    sourceLabel?: string;
+    /** 播不了的原因（音源已停用之类），跟在最后。 */
+    unavailableLabel?: string;
+}>(({ track, index, style, onPlay, onAddToQueue, onCollect, isUnavailable, isActive, albumTrackLabel, sourceLabel, unavailableLabel }) => {
     const { t } = useTranslation();
     const coverUrl = getSongCoverUrl(track) || '';
     const artistName = getSongArtistLabel(track).split(',')[0]?.trim() || 'Unknown Artist';
@@ -209,8 +218,25 @@ export const TrackListItem = React.memo<{
                             </span>
                         )}
                     </div>
-                    <div className="text-[10px] opacity-60 truncate leading-tight mt-0.5">{artistName}</div>
+                    <div className="text-[10px] opacity-60 truncate leading-tight mt-0.5">
+                        {[artistName, sourceLabel, isUnavailable ? unavailableLabel : ''].filter(Boolean).join(' · ')}
+                    </div>
                 </div>
+                {!isUnavailable && onCollect && (
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onCollect();
+                        }}
+                        className="p-2 ml-1 rounded-full hover:bg-black/10 dark:hover:bg-white/10 opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                        title={t('scratchpad.collect')}
+                        aria-label={t('scratchpad.collect')}
+                        data-track-action="collect"
+                        style={{ color: 'var(--text-secondary)' }}
+                    >
+                        <NotebookPen size={15} />
+                    </button>
+                )}
                 {!isUnavailable && onAddToQueue && (
                     <button
                         onClick={(e) => {

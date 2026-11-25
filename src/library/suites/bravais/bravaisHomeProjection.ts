@@ -3,20 +3,21 @@ import type {
     LibraryDirectoryNode,
     LibraryDirectoryNodeSelection,
     LibraryDirectoryVisibilityMode,
-} from '../../core/contracts/directory';
-import type { LibraryHomeCard, LibraryHomeTabView } from '../../core/contracts/homeModel';
-import { homeCardToDirectoryItem } from '../../core/model/directoryItems';
-import { isDirectoryItemHidden, isHideableDirectoryItem } from '../../core/model/directoryVisibility';
+} from '../../core/directory/directory.contract';
+import type { LibraryHomeCard, LibraryHomeGroupView, LibraryHomeTabView } from '../../core/home/homeModel.contract';
+import { homeCardToDirectoryItem } from '../../core/directory/directoryItems';
+import { isDirectoryItemHidden, isHideableDirectoryItem } from '../../core/directory/directoryVisibility';
 import {
     LIBRARY_HOME_SPECIAL_ORDER,
     resolveLibraryHomeSpecial,
     type LibraryHomeCardSource,
     type LibraryHomeSpecialKind,
-} from '../../core/model/homeSpecialCards';
-import { resolveDirectoryRows } from '../../core/model/directoryTree';
-import { cycleIndex } from '../../core/model/homeSources';
-import { resolveDirectoryNodeSelection, resolveNextDirectoryNodeSelectionTarget } from '../../core/model/directoryBatch';
-import type { BravaisItem } from './bravaisLayer';
+} from '../../core/home/homeSpecialCards';
+import { resolveDirectoryRows } from '../../core/directory/directoryTree';
+import { cycleIndex } from '../../core/home/homeSources';
+import { resolveDirectoryNodeSelection, resolveNextDirectoryNodeSelectionTarget } from '../../core/directory/directoryBatch';
+import type { LibraryHomeExtraTab } from '../../core/suite/suite.contract';
+import type { BravaisItem, BravaisSeamTab } from './bravaisLayer';
 import type { BravaisDirectoryRow } from './bravaisHomeModels';
 import { homeCardItemKey, projectHomeCardItem, type HomeCardLabels } from './bravaisProjection';
 
@@ -24,7 +25,8 @@ import { homeCardItemKey, projectHomeCardItem, type HomeCardLabels } from './bra
 // 首页的纯投影（设计稿 §10.5、§5「目录树 = GridMap 的批量模式」）：
 // - 首页卡片 → 目录条目（与 GridMap、TUI 同一个映射）→ 墙上的磁贴，带上眼睛按钮、管理隐藏视图里的已隐藏、
 //   批量模式里的选中 / 未选中（灰度 + 半透明）；
-// - 墙的模式与过滤身份：批量模式与「只看隐藏」怕重复，退化为以缝为中心的有限拼贴；浏览与「管理隐藏」是无限拼贴。
+// - 墙的模式与过滤身份：批量模式与「只看隐藏」怕重复，退化为以缝为中心的有限拼贴；浏览与「管理隐藏」平常是无限拼贴，
+//   设置「首页只用有限墙」（useLibraryWallLookStore 的 homeFinite）开着时也是有限拼贴；
 //   过滤身份（wall.filterKey）里带上二级切换的 section，所以切本地四行、进出管理隐藏 / 批量都从缝的两侧边缘整面翻；
 // - 目录树面板的行：core 的 resolveDirectoryRows 排树，三态与「仅本层」沿用 resolveDirectoryNodeSelection /
 //   resolveNextDirectoryNodeSelectionTarget（与 GridMap 的批量面板同一套）；
@@ -49,6 +51,7 @@ export const resolveHomeWallMode = ({
     visibilityMode,
     batch,
     query,
+    finiteOnly = false,
 }: {
     /** 二级切换的 section（在线页签给页签自己）。 */
     section: string;
@@ -57,14 +60,18 @@ export const resolveHomeWallMode = ({
     batch: boolean;
     /** 这一页的过滤词（目录会话的 query；浏览、管理隐藏、批量模式里都生效）。 */
     query: string;
+    /** 首页只用有限墙（设置开关；首页 Folia 的标签页签一直这样）：浏览与「管理隐藏」也给有限拼贴，不循环重复。 */
+    finiteOnly?: boolean;
 }): BravaisHomeWallMode => {
     const text = query.trim();
     if (batch) return { mode: 'finite', filterKey: `${section}|batch|${text}` };
     // 当前页过滤（设计稿 §7.6 / §4）：过滤中退化为以缝为中心的有限拼贴（不重复）；过滤身份带上词，换词就从缝的两侧翻。
     if (visibilityMode === 'manage-hidden-only') return { mode: 'finite', filterKey: `${section}|hidden-only${text ? `|${text}` : ''}` };
     if (text) return { mode: 'finite', filterKey: `${section}|${visibilityMode}|filter|${text}` };
-    if (visibilityMode === 'manage') return { mode: 'infinite', filterKey: `${section}|manage` };
-    return { mode: 'infinite', filterKey: section };
+    // 换开关时 mode 变了，stage 照样整面翻（bravaisDisplayUpdate 比 mode），过滤身份不用另带标记。
+    const mode = finiteOnly ? 'finite' : 'infinite';
+    if (visibilityMode === 'manage') return { mode, filterKey: `${section}|manage` };
+    return { mode, filterKey: section };
 };
 
 type HomeItemFlags = Pick<BravaisItem, 'hideable' | 'hidden' | 'selected' | 'dimmed' | 'direct'>;
@@ -275,10 +282,46 @@ export const resolveSelectAllState = (selectedCount: number, displayCount: numbe
  * 走 core 的 cycleIndex，与网格 / TUI 的 Tab 循环同一套规则（当前页签被隐藏、不在列表里时，往前从最后一个找起）。
  */
 export const cycleHomeTab = (
-    tabs: readonly Pick<LibraryHomeTabView, 'key' | 'disabledReason'>[],
+    tabs: readonly { key: string; disabledReason?: string }[],
     active: string,
     delta: 1 | -1,
 ): string | null => {
     const index = cycleIndex(tabs, tabs.findIndex(tab => tab.key === active), delta, tab => !tab.disabledReason);
     return index < 0 || tabs[index].key === active ? null : tabs[index].key;
 };
+
+/**
+ * 首页两级页签的一级那一排：组（Folia、当前在线音源、本地、Navidrome）在前，扩展页签在后；key 是组的 key。
+ * 有扩展页签开着时组都不算选中。
+ */
+export const projectHomeSeamGroups = (
+    groups: readonly LibraryHomeGroupView[],
+    extraTabs: readonly Pick<LibraryHomeExtraTab, 'id' | 'label' | 'active'>[] = [],
+): BravaisSeamTab[] => {
+    const extraActive = extraTabs.some(tab => tab.active);
+    return [
+        ...groups.map(group => ({
+            key: group.key,
+            label: group.label,
+            active: !extraActive && group.active,
+            disabled: group.target === null,
+            ...(group.disabledReason ? { title: group.disabledReason } : {}),
+        })),
+        ...extraTabs.map(entry => ({ key: entry.id, label: entry.label, active: entry.active, disabled: false })),
+    ];
+};
+
+/**
+ * F6 / Shift+F6 的那一排：原生页签加扩展页签（与网格首页 Tab 循环的 navigationTabs 同一个顺序），当前项是开着的
+ * 扩展页签，没有就是原生的当前页签。返回下一个要选的 key，规则同 cycleHomeTab。
+ */
+export const cycleHomeSeamTab = (
+    tabs: readonly Pick<LibraryHomeTabView, 'key' | 'disabledReason'>[],
+    active: string,
+    extraTabs: readonly Pick<LibraryHomeExtraTab, 'id' | 'active'>[],
+    delta: 1 | -1,
+): string | null => cycleHomeTab(
+    [...tabs, ...extraTabs.map(entry => ({ key: entry.id }))],
+    extraTabs.find(entry => entry.active)?.id ?? active,
+    delta,
+);

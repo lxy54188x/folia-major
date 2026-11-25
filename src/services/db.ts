@@ -11,7 +11,6 @@ import {
 import {
   clearBrowserCacheByCategory,
   clearCacheTables,
-  getBrowserCacheUsage,
   getBrowserCacheUsageByCategory,
   getCacheKeysByPrefix,
   putCacheEntry,
@@ -32,6 +31,7 @@ import { clearSessionValues, putSessionValue, readSession } from './repositories
 import { readThemeRegistryEntries, writeThemeRegistryEntries } from './repositories/themeRegistryRepository';
 import { clearCoverAssets, getCoverAssetUsage } from './binaryAssetStore';
 import { clearLocalCoverBinaries } from './localCoverBinaryStore';
+import { resetFoliaPlaylistStorage } from './foliaPlaylist/foliaPlaylistStorage';
 import {
   cancelLocalCoverAssetMigration,
   resetLocalCoverAssetRuntime,
@@ -152,22 +152,13 @@ export const clearCache = async (preserveKeys: string[] = []): Promise<void> => 
   }
 };
 
-export const getCacheUsage = async (): Promise<number> => {
-  try {
-    const browserSize = await getBrowserCacheUsage();
-    const audioSize = hasElectronAudioCacheBridge() ? await window.electron!.getAudioCacheUsage() : 0;
-    return browserSize + audioSize + await getCoverAssetUsage();
-  } catch {
-    return 0;
-  }
-};
-
 export const getCacheUsageByCategory = async (): Promise<{
   playlist: number;
   lyrics: number;
   cover: number;
   media: number;
   analysis: number;
+  volumeBalance: number;
   mediaCount: number;
 }> => {
   try {
@@ -182,7 +173,7 @@ export const getCacheUsageByCategory = async (): Promise<{
     usage.cover += await getCoverAssetUsage();
     return usage;
   } catch {
-    return { playlist: 0, lyrics: 0, cover: 0, media: 0, analysis: 0, mediaCount: 0 };
+    return { playlist: 0, lyrics: 0, cover: 0, media: 0, analysis: 0, volumeBalance: 0, mediaCount: 0 };
   }
 };
 
@@ -220,7 +211,7 @@ export const getLocalSongs = async (): Promise<LocalSong[]> => {
 
 /**
  * 按 id 读一首本地歌曲的最新记录。
- * 不走 ensureLocalLibraryInitialized：那一步会把 local_music 和 assignments 整表读一遍，
+ * 不走 ensureLocalLibraryInitialized：那一步要把 local_music 和 assignments 的主键整表读一遍，
  * 而这里只服务切歌、匹配写回这类「只关心一首」的热路径。读失败或记录不存在时返回 undefined。
  */
 export const getLocalSong = async (id: string): Promise<LocalSong | undefined> => {
@@ -257,6 +248,9 @@ export const clearAllData = async (): Promise<void> => {
     resetLocalCoverAssetRuntime();
     await appDatabase.delete();
     await appDatabase.open();
+    // Folia 歌单在它自己的库里（FoliaPlaylistsDB），一起清掉。
+    await resetFoliaPlaylistStorage();
+    // 歌曲评论（FoliaSongNotesDB）不清：用户定的长期保留（2026-11-24），确认框的文案写明了。
   } catch (error) {
     console.error('Failed to clear all data', error);
   }

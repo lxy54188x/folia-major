@@ -11,9 +11,9 @@ import {
     notifyCollectionPop,
     useCollectionNavigationStore,
 } from '../stores/useCollectionNavigationStore';
-import type { GridViewCollectionDescriptor } from '../library/core/contracts/collection';
-import { collectionHashPath } from '../library/core/model/collectionIdentity';
-import { resolveCollectionPopTo } from '../library/core/model/collectionNavigation';
+import type { GridViewCollectionDescriptor } from '../library/core/collection/collection.contract';
+import { collectionHashPath } from '../library/core/collection/collectionIdentity';
+import { resolveCollectionPopTo } from '../library/core/collection/collectionNavigation';
 import {
     APP_HISTORY_SESSION,
     createNavigationHistoryJournal,
@@ -22,18 +22,16 @@ import {
     type NavigationHistoryState,
 } from './navigationHistoryJournal';
 import { useAppViewStore } from '../stores/useAppViewStore';
-import type { AppView } from '../stores/useAppViewStore';
+import type { AppView, LatticeSource } from '../stores/useAppViewStore';
 import { usePlaybackStore } from '../stores/usePlaybackStore';
 import { resolvePlaybackSurface, usePlaybackEntryViewStore, type PlaybackEntryView } from '../stores/usePlaybackEntryViewStore';
-import { setStatusMessage } from '../stores/useStatusMessageStore';
-import i18n from '../i18n/config';
 
 // src/hooks/useAppNavigation.ts
 
 type ViewState = AppView;
 
 type LocalMusicNavigationState = {
-    activeRow: 0 | 1 | 2 | 3;
+    activeRow: 0 | 1 | 2;
     selectedGroup: LocalLibraryGroup | null;
     detailStack: LocalLibraryGroup[];
     detailOriginView: 'home' | 'player' | null;
@@ -78,19 +76,21 @@ export const shouldReplacePlayerNavigation = (
 export const resolvePlayerCapsuleNavigationTarget = (
     view: ViewState,
     playbackEntryView: PlaybackEntryView,
-    isFmMode: boolean,
 ): 'player' | 'lattice' | null => {
     if (view === 'lattice') return null;
     // fb3：「留在原处」没有自己的视图，显式要求进入播放视图（胶囊、启动、bravais 的「进入」）时去播放页。
-    return resolvePlaybackSurface(playbackEntryView) === 'lattice' && !isFmMode ? 'lattice' : 'player';
+    // 私人 FM 也去 Lattice：那里换成电台墙（lattice/radio/）。
+    return resolvePlaybackSurface(playbackEntryView) === 'lattice' ? 'lattice' : 'player';
 };
 
 const getSearchHistorySnapshot = (): NavigationHistoryState['search'] => {
     const searchState = useSearchNavigationStore.getState();
     return searchState.isSearchOpen
         ? {
-            query: searchState.searchQuery,
+            // 记下的是搜出当前结果的词：恢复时按它查缓存，输入框里没提交的字查不到。
+            query: searchState.submittedQuery,
             sourceTab: searchState.searchSourceTab,
+            kind: searchState.searchKind,
             returnView: searchState.searchReturnView,
         }
         : null;
@@ -99,34 +99,30 @@ const getSearchHistorySnapshot = (): NavigationHistoryState['search'] => {
 /**
  * Which view a launch lands on. "Open player on launch" means "open the playback surface", so it
  * follows the stored playback entry preference and reuses the capsule's Lattice rule: Lattice only
- * when it can actually show something (non-empty queue, not FM), otherwise the player.
+ * when it can actually show something (non-empty queue), otherwise the player.
  */
 export const resolveStartupView = ({
     openPlayerOnLaunch,
     playbackEntryView,
-    isFmMode,
     queueLength,
 }: {
     openPlayerOnLaunch: boolean;
     playbackEntryView: PlaybackEntryView;
-    isFmMode: boolean;
     queueLength: number;
 }): 'home' | 'player' | 'lattice' => {
     if (!openPlayerOnLaunch) return 'home';
     if (queueLength <= 0) return 'player';
-    return resolvePlayerCapsuleNavigationTarget('home', playbackEntryView, isFmMode) ?? 'player';
+    return resolvePlayerCapsuleNavigationTarget('home', playbackEntryView) ?? 'player';
 };
 
 /** Whether a launch wanted Lattice but had to start on the player because the queue was not restored yet. */
 export const isStartupLatticeDeferred = ({
     openPlayerOnLaunch,
     playbackEntryView,
-    isFmMode,
 }: {
     openPlayerOnLaunch: boolean;
     playbackEntryView: PlaybackEntryView;
-    isFmMode: boolean;
-}): boolean => openPlayerOnLaunch && playbackEntryView === 'lattice' && !isFmMode;
+}): boolean => openPlayerOnLaunch && playbackEntryView === 'lattice';
 
 // The last session is restored asynchronously (IndexedDB), so the queue is still empty when the
 // startup view is chosen; a deferred Lattice launch waits at most this long for it.
@@ -135,7 +131,6 @@ const STARTUP_LATTICE_RESTORE_WINDOW_MS = 10000;
 const getStartupView = (): ViewState => resolveStartupView({
     openPlayerOnLaunch: localStorage.getItem(OPEN_PLAYER_ON_LAUNCH_KEY) === 'true',
     playbackEntryView: usePlaybackEntryViewStore.getState().playbackEntryView,
-    isFmMode: usePlaybackStore.getState().isFmMode,
     queueLength: usePlaybackStore.getState().playQueue.length,
 });
 
@@ -146,18 +141,11 @@ const LOCAL_MUSIC_LAST_ROW_KEY = 'folia_local_music_last_row';
 // 最多等这么久。应用内返回不受它限制（连按返回本来就该一层层退）。
 const COLLECTION_TRAVERSAL_TIMEOUT_MS = 1000;
 
-export const blockLatticeNavigationInFm = (): boolean => {
-    if (!usePlaybackStore.getState().isFmMode) return false;
-    setStatusMessage({ type: 'info', text: i18n.t('status.latticeUnavailableInFm') });
-    return true;
-};
-
 export function useAppNavigation() {
     // The view itself lives in useAppViewStore so that consumers far from here can read it
     // without being handed it; this hook stays the only writer.
     const currentView = useAppViewStore(state => state.view);
     const setCurrentView = useAppViewStore(state => state.setView);
-    const isFmMode = usePlaybackStore(state => state.isFmMode);
     const [focusedPlaylistIndex, setFocusedPlaylistIndex] = useState(0);
     // 应用历史记录的内存日志（N1）：面包屑跳层（popCollectionTo）据此算出要后退几步。寿命与这个 hook 相同（App 只挂一份）。
     const [historyJournal] = useState(createNavigationHistoryJournal);
@@ -169,7 +157,8 @@ export function useAppNavigation() {
             const saved = localStorage.getItem(LOCAL_MUSIC_LAST_ROW_KEY);
             if (saved !== null) {
                 const parsed = parseInt(saved, 10);
-                if (!isNaN(parsed) && parsed >= 0 && parsed <= 3) {
+                // 以前的第 3 行是「歌单」，本地歌单并进 Folia 之后没有了：存着 3 的落回文件夹（0）。
+                if (!isNaN(parsed) && parsed >= 0 && parsed <= 2) {
                     savedRow = parsed;
                 }
             }
@@ -210,6 +199,8 @@ export function useAppNavigation() {
 
     const restoreHistoryState = useCallback((state: NavigationHistoryState) => {
         localStorage.setItem(LAST_APP_VIEW_KEY, state.view);
+        // Before the view: the wall reads what it shows when it is put up.
+        if (state.view === 'lattice') useAppViewStore.getState().setLatticeSource(state.latticeSource ?? 'queue');
         setCurrentView(state.view);
         useCollectionNavigationStore.getState().restore(state.collection ?? null);
         if (state.search) {
@@ -225,20 +216,25 @@ export function useAppNavigation() {
         hash,
         search = null,
         collection = null,
+        latticeSource,
     }: {
         view: ViewState;
         replace?: boolean;
         hash?: string;
         search?: NavigationHistoryState['search'];
         collection?: NavigationHistoryState['collection'];
+        latticeSource?: LatticeSource;
     }) => {
         const currentHistoryIndex = getAppHistoryIndex(window.history.state);
-        const nextState = buildHistoryState(
-            view,
-            search,
-            collection,
-            replace ? currentHistoryIndex : currentHistoryIndex + 1,
-        );
+        const nextState: NavigationHistoryState = {
+            ...buildHistoryState(
+                view,
+                search,
+                collection,
+                replace ? currentHistoryIndex : currentHistoryIndex + 1,
+            ),
+            ...(latticeSource === 'explore' ? { latticeSource } : {}),
+        };
         const method = replace ? window.history.replaceState.bind(window.history) : window.history.pushState.bind(window.history);
         // 当前记录可能是别处直接 pushState 写的（例如 suite 自己的面板记录），压栈前先把它同步进日志。
         if (!replace) historyJournal.observe(window.history.state);
@@ -283,7 +279,6 @@ export function useAppNavigation() {
         const startupOptions = {
             openPlayerOnLaunch: localStorage.getItem(OPEN_PLAYER_ON_LAUNCH_KEY) === 'true',
             playbackEntryView: usePlaybackEntryViewStore.getState().playbackEntryView,
-            isFmMode: usePlaybackStore.getState().isFmMode,
         };
         if (initialView === 'player' && isStartupLatticeDeferred(startupOptions)) {
             const tryUpgrade = () => {
@@ -292,7 +287,7 @@ export function useAppNavigation() {
                 const stillOnStartupEntry = useAppViewStore.getState().view === 'player'
                     && historyState?.view === 'player'
                     && getAppHistoryIndex(historyState) === 0;
-                if (!stillOnStartupEntry || playback.isFmMode) {
+                if (!stillOnStartupEntry) {
                     cancelDeferredLattice();
                     return;
                 }
@@ -300,7 +295,6 @@ export function useAppNavigation() {
                 cancelDeferredLattice();
                 const target = resolveStartupView({
                     ...startupOptions,
-                    isFmMode: playback.isFmMode,
                     queueLength: playback.playQueue.length,
                 });
                 if (target !== 'lattice') return;
@@ -351,15 +345,6 @@ export function useAppNavigation() {
         });
     }, [pushNavigationState]);
 
-    useEffect(() => {
-        if (!isFmMode || currentView !== 'lattice') return;
-        const collection = useCollectionNavigationStore.getState().snapshot;
-        const search = getSearchHistorySnapshot();
-        // FM owns and extends its queue dynamically, so replace a stale Lattice entry instead of
-        // leaving it in browser history where Back would immediately reopen an unsupported view.
-        pushNavigationState({ view: 'player', replace: true, hash: '#player', search, collection });
-    }, [currentView, isFmMode, pushNavigationState]);
-
     const navigateToHome = useCallback(() => {
         if (useAppViewStore.getState().view === 'home') {
             return;
@@ -376,13 +361,20 @@ export function useAppNavigation() {
         });
     }, [pushNavigationState]);
 
-    const navigateToLattice = useCallback(() => {
-        if (blockLatticeNavigationInFm()) return;
+    // `source`: the home header's pill, pressed on the explore tab, asks for the explore page's
+    // entries. Every other way in shows the play queue. (Several callers are click handlers and
+    // hand over the event: whatever is not 'explore' is the queue.)
+    const navigateToLattice = useCallback((source?: LatticeSource) => {
+        const latticeSource: LatticeSource = source === 'explore' ? 'explore' : 'queue';
+        // In Personal FM the queue wall is drawn as the radio wall (Lattice.tsx).
         if (useAppViewStore.getState().view === 'lattice') return;
         useSearchNavigationStore.getState().hideSearchOverlay();
+        // A wall opened anew starts where an opening starts, not on the tile an earlier one was left on.
+        useAppViewStore.getState().setLatticeReturnTileId(null);
         pushNavigationState({
             view: 'lattice',
             hash: '#lattice',
+            latticeSource,
         });
     }, [pushNavigationState]);
 
@@ -393,9 +385,7 @@ export function useAppNavigation() {
      * Only redirects when the listener is arriving from somewhere else. Player and Lattice are both
      * playback surfaces, and this also runs on auto-advance — moving someone from the one they are
      * watching to the other because a track ended would be the setting reaching too far.
-     *
-     * FM falls back to the player silently: Lattice cannot show an FM queue, and the usual
-     * "unavailable in FM" toast would be noise when nobody asked to open it.
+     * Personal FM goes to Lattice too, which shows it as the radio wall.
      */
     const navigateToPlaybackView = useCallback(() => {
         const view = useAppViewStore.getState().view;
@@ -404,7 +394,7 @@ export function useAppNavigation() {
         // fb3「留在原处」：播放不带人去任何地方——资料库的卡片 / 墙自己显示正在播放（暂停 / 继续）。
         // 已经在播放页上（例如自动切歌）时照旧走下面的 navigateToPlayer，与另外两个值一致。
         if (entryView === 'stay' && view !== 'player') return;
-        if (entryView === 'lattice' && view !== 'player' && !usePlaybackStore.getState().isFmMode) {
+        if (entryView === 'lattice' && view !== 'player') {
             navigateToLattice();
             return;
         }
@@ -415,7 +405,6 @@ export function useAppNavigation() {
         const target = resolvePlayerCapsuleNavigationTarget(
             useAppViewStore.getState().view,
             usePlaybackEntryViewStore.getState().playbackEntryView,
-            usePlaybackStore.getState().isFmMode,
         );
         if (target === 'lattice') {
             navigateToLattice();
@@ -468,7 +457,8 @@ export function useAppNavigation() {
         returnView?: SearchReturnView;
     }) => {
         useCollectionNavigationStore.getState().clear();
-        const search = { query, sourceTab, returnView };
+        // 搜索先提交、再压历史：种类按提交时定下的记（来源搜不到的种类已退回单曲）。
+        const search = { query, sourceTab, kind: useSearchNavigationStore.getState().searchKind, returnView };
         pushNavigationState({
             view: 'home',
             replace,

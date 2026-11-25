@@ -1,11 +1,15 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { COUNTED_PLATFORMS, countPlatformNames, totalOf } from './platformNameCount.ts';
+import { PLATFORM_NAME_PLACES } from './platformNamePlaces.ts';
 
 // test/unit/onlineMusic/omniArchitecture.test.ts
 
 const roots = ['src/components', 'src/hooks', 'src/stores'];
-const forbiddenImport = /from\s+['"][^'"]*(providerRegistry|kugouTransport|qqTransport|bodianTransport|services\/netease)['"]/;
+// Folium 2.0: a platform's code moves into sources/<id>/ (S5, one by one); the UI and state layers never import it
+// there either (Dedicatus D110 says the same for the module graph).
+const forbiddenImport = /from\s+['"][^'"]*(sources\/|providerRegistry|kugouTransport|qqTransport|onlineMusic\/netease\/netease)['"]/;
 
 const collectSourceFiles = async (path: string): Promise<string[]> => {
     const entry = await stat(path);
@@ -39,4 +43,22 @@ describe('Omni architecture boundaries', () => {
         ];
         await expect(Promise.all(legacyFiles.map(file => stat(file)))).rejects.toThrow();
     });
+
+    // One platform's rule stays with the platform. Every line outside a platform's own folders
+    // that names it is counted; the list says how many each file may hold and why they stay.
+    // Reads every file under the platform roots: past the default 5 s on Windows next to the suite's real source
+    // builds (buildSources.test.ts), so it gets a limit of its own.
+    it('lets no file outside a platform folder name a platform more often than the list says', () => {
+        const { places } = countPlatformNames();
+        const differences: string[] = [];
+        for (const file of new Set([...places.keys(), ...Object.keys(PLATFORM_NAME_PLACES)])) {
+            for (const platform of COUNTED_PLATFORMS) {
+                const counted = totalOf(places.get(file)?.[platform]);
+                const listed = PLATFORM_NAME_PLACES[file]?.n[platform] ?? 0;
+                if (counted > listed) differences.push(`${file} names ${platform} on ${counted} lines, the list allows ${listed}: the rule belongs in the platform's own folder`);
+                if (counted < listed) differences.push(`${file} names ${platform} on ${counted} lines, the list still says ${listed}: lower it (platformNameCount.ts --lower)`);
+            }
+        }
+        expect(differences).toEqual([]);
+    }, 30_000);
 });

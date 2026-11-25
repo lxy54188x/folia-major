@@ -8,6 +8,7 @@ import { buildWordColorRanges, resolveWordColor } from '@/components/visualizer/
 import type { FoliumLine, FoliumLyricsHelpers, FoliumThemeHelpers } from './contract';
 import { toFoliumLines } from './dto';
 import { normalizeFoliumLyricsTrack, parseFoliumLyricsTrack } from './lyricsSource';
+import { isPureMusicLyricText } from '@/utils/lyrics/pureMusic';
 
 // src/mods/folium/sharedHelpers.ts
 // `folium.lyrics` and `folium.theme`: the pure helpers builtin visualizers
@@ -15,7 +16,7 @@ import { normalizeFoliumLyricsTrack, parseFoliumLyricsTrack } from './lyricsSour
 // FoliumLine / FoliumTheme mirror the host Line / Theme, so every helper here
 // is the host function itself behind a type boundary, not a second copy.
 // Nothing here holds state, and both the main and the export window get it.
-// `parse` (1.4) is the one asynchronous helper: it runs the local lyric file
+// `parse` is the one asynchronous helper: it runs the local lyric file
 // pipeline, whose parsers live in a worker.
 
 // FoliumLine carries every Line field the helpers read, under the same names.
@@ -53,11 +54,15 @@ const lyricsHelpers: FoliumLyricsHelpers = {
             isWordByWord: Boolean(lyrics?.isWordByWord && lyrics.lines.length > 0),
         });
     },
+    isPureMusicText: (text) => isPureMusicLyricText(typeof text === 'string' ? text : null),
 };
 
 export const FOLIUM_LYRICS_HELPERS: FoliumLyricsHelpers = Object.freeze(lyricsHelpers);
 
-const themeHelpers: FoliumThemeHelpers = {
+/** The font helpers of `folium.theme`, the same in both contexts; the rest of it is per mod (theme/service.ts). */
+export type FoliumThemeFontHelpers = Pick<FoliumThemeHelpers, 'resolveFontStack' | 'resolveTranslationFontStack' | 'resolveFontWeight'>;
+
+const themeHelpers: FoliumThemeFontHelpers = {
     resolveFontStack: (theme) => resolveThemeFontStack(theme as Pick<Theme, 'fontStyle' | 'fontFamily' | 'fontFamilyStack'>),
     resolveTranslationFontStack: (theme) => (
         resolveThemeTranslationFontStack(theme as Pick<Theme, 'fontStyle' | 'fontFamily' | 'fontFamilyStack'>)
@@ -65,4 +70,4 @@ const themeHelpers: FoliumThemeHelpers = {
     resolveFontWeight: (theme, fallback) => resolveThemeFontWeight(theme, fallback),
 };
 
-export const FOLIUM_THEME_HELPERS: FoliumThemeHelpers = Object.freeze(themeHelpers);
+export const FOLIUM_THEME_HELPERS: FoliumThemeFontHelpers = Object.freeze(themeHelpers);

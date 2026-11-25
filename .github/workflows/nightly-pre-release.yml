@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
 
     steps:
       - name: Check out Git repository
@@ -104,6 +104,22 @@ jobs:
           APP_VERSION_LABEL: Limo
           APP_RELEASE_CHANNEL: limo
         run: npm run build
+
+      # The analysis models' runtime is built from the pinned MNN source in build/beforePack.cjs
+      # (build/buildMnnRuntime.mjs; cmake and the platform's C++ compiler are on every hosted image).
+      # Cached because MNN is minutes of compile; the key covers everything the build reads.
+      - name: Cache MNN runtime build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/.mnn-src
+            build/mnn
+          key: mnn-${{ runner.os }}-${{ hashFiles('build/buildMnnRuntime.mjs', 'native/folia-mnn/**') }}
+
+      # Folium 2.0: the built-in source mods, sources/<id>/ built into dist-mods/ (dev/sources/build.mjs), which
+      # build/bundledSources.mjs (build.extends) ships them as resources/builtin-mods. FOLIA_BUNDLED_SOURCES unset: every source in sources/.
+      - name: Build built-in source mods
+        run: npm run sources:build
 
       - name: Package Electron app
         env:

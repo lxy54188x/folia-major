@@ -1,55 +1,85 @@
+// @vitest-environment jsdom
+// @builtin-sources
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { resolveSongCatalogRef } from '@/services/onlineMusic/catalogRefs';
+import { createProviderSongMetadata } from '@/utils/songMetadata';
+import { kugouPlaybackUrl } from '../../../sources/kugou/core/kugouProvider';
+import { KUGOU_NO_VIP_CREDENTIAL_ANSWER, answerKugouRequests, hostKugouSong, kugouHttpAnswer, lazyKugou, signInKugouHint } from '../helpers/kugouSource';
 
 // test/unit/onlineMusic/kugouProvider.test.ts
+// 酷狗音源模组经注册着的音源跑（helpers/kugouSource.ts）：桌面版的 transport，到 main 入口的 request、anonymousSearch、
+// legacyPlayInfo 用替身答。请求失败时替身抛的错的 message 就是桥的那一行（KuGouApi[...]），由 transport 读成宿主的错。
 
-const requestMock = vi.hoisted(() => vi.fn());
-const anonymousSearchMock = vi.hoisted(() => vi.fn());
-const legacyPlayInfoMock = vi.hoisted(() => vi.fn());
-const transportState = vi.hoisted(() => ({ hasAuthenticatedSearchSession: true }));
-
-vi.mock('@/services/onlineMusic/kugouTransport', () => ({
-    getKugouTransportAvailability: () => ({ configured: false, reason: 'not-configured' }),
-    hasKugouAuthenticatedSearchSession: () => transportState.hasAuthenticatedSearchSession,
-    requestKugouAnonymousSearch: anonymousSearchMock,
-    requestKugou: requestMock,
-    requestKugouLegacyPlayInfo: legacyPlayInfoMock,
-}));
-
-const sessionState = vi.hoisted(() => ({ userId: 'web-session-user' }));
-
-vi.mock('@/services/onlineMusic/providerStorage', () => ({
-    readProviderSessionValue: () => sessionState.userId,
-    removeProviderSessionValue: vi.fn(),
-}));
-
-import {
-    kugouProvider,
-    normalizeKugouSong,
-    resolveKugouSongCatalogRefs,
-} from '@/services/onlineMusic/kugouProvider';
-import { resolveSongCatalogRef } from '@/services/onlineMusic/catalogRefs';
-import { classifyPlaybackError } from '@/services/playbackRecovery/onlinePlaybackFailure';
-import { resolvePlaybackFailurePolicy } from '@/services/playbackRecovery/playbackFailurePolicy';
-import { OnlineProviderError } from '@/types/onlineMusic';
+const {
+    request: requestMock, songUrlNew: songUrlNewMock, anonymousSearch: anonymousSearchMock, legacyPlayInfo: legacyPlayInfoMock,
+} = answerKugouRequests();
+const kugouProvider = lazyKugou();
+const normalizeKugouSong = hostKugouSong;
+const resolveKugouSongCatalogRefs = (song: Parameters<NonNullable<NonNullable<typeof kugouProvider.catalog>['resolveSongCatalogRefs']>>[0]) => (
+    kugouProvider.catalog!.resolveSongCatalogRefs!(song)
+);
 
 describe('kugouProvider', () => {
+    // 字段取自 2026-10-31 `/search?type=album` 与 `type=special` 的实测回答（裁剪过）。
+    it('searches albums and playlists and opens a playlist by its gid', async () => {
+        requestMock.mockResolvedValueOnce({
+            status: 1, error_code: 0,
+            data: {
+                total: 500,
+                lists: [{
+                    albumid: 960399, albumname: '魔杰座', singer: '周杰伦', songcount: 11, publish_time: '2008-10-15',
+                    img: 'http://imge.kugou.com/stdmusic/240/20241118/20241118160622508429.jpg',
+                    singers: [{ name: '周杰伦', id: 3520 }],
+                }],
+            },
+        });
+        const albums = await kugouProvider.search!.searchAlbums!('周杰伦', 30, 0);
+        expect(requestMock).toHaveBeenLastCalledWith('search', expect.objectContaining({ keywords: '周杰伦', type: 'album', page: 1, pagesize: 30 }));
+        // 按页码翻：下一页从第 2 页（offset 30）起，不管这一页实际几条。
+        expect(albums).toMatchObject({ total: 500, hasMore: true, nextOffset: 30 });
+        expect(albums.items[0]).toMatchObject({
+            providerId: 'kugou', id: '960399', type: 'album', name: '魔杰座', trackCount: 11, artists: [{ name: '周杰伦' }],
+        });
+        expect(albums.items[0].coverUrl).toMatch(/^https:/);
+
+        requestMock.mockResolvedValueOnce({
+            status: 1, error_code: 0,
+            data: {
+                total: 480,
+                lists: [{
+                    specialid: 6409645, specialname: '周杰伦必听热歌', gid: 'collection_3_2132029040_287_0', song_count: 154,
+                    nickname: '酷乐推荐', suid: '2132029040', play_count: '179854', total_play_count: '37035193',
+                    img: 'http://imge.kugou.com/soft/collection/150/20260414/20260414170554928435.png',
+                }],
+            },
+        });
+        const playlists = await kugouProvider.search!.searchPlaylists!('周杰伦', 30, 30);
+        expect(requestMock).toHaveBeenLastCalledWith('search', expect.objectContaining({ type: 'special', page: 2, pagesize: 30 }));
+        expect(playlists.items[0]).toMatchObject({
+            providerId: 'kugou', id: 'collection_3_2132029040_287_0', type: 'playlist', name: '周杰伦必听热歌',
+            trackCount: 154, playCount: 37035193, creator: { nickname: '酷乐推荐' },
+        });
+    });
+
     beforeEach(async () => {
-        // provider 里的"我喜欢"歌单引用和行号缓存是模块级的，按会话生命周期清理；用例之间必须先登出，
+        // 音源里的"我喜欢"歌单引用和行号缓存按会话生命周期清理；用例之间必须先登出，
         // 否则上一条用例写进去的引用会让下一条跳过 user_playlist 请求。
         requestMock.mockReset();
         requestMock.mockResolvedValue(undefined);
         await kugouProvider.auth?.logout?.();
 
-        sessionState.userId = 'web-session-user';
         vi.useRealTimers();
         requestMock.mockReset();
         anonymousSearchMock.mockReset();
         legacyPlayInfoMock.mockReset();
-        transportState.hasAuthenticatedSearchSession = true;
+        songUrlNewMock.mockReset();
+        songUrlNewMock.mockReturnValue(KUGOU_NO_VIP_CREDENTIAL_ANSWER);
+        // 登出也清掉了窗口里的账号 id 提示：每条用例从登录着的账号开始。
+        signInKugouHint('web-session-user');
     });
 
     it('uses anonymous signed search when no authenticated KuGou session exists', async () => {
-        transportState.hasAuthenticatedSearchSession = false;
+        signInKugouHint(null);
         anonymousSearchMock.mockResolvedValue({
             data: {
                 lists: [
@@ -107,6 +137,133 @@ describe('kugouProvider', () => {
         expect(page.items[0]?.id).toBe('AUTHENTICATED-HASH');
     });
 
+    it('falls back to anonymous search when an authenticated first page is empty', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        requestMock.mockResolvedValue({ data: { lists: [] } });
+        anonymousSearchMock.mockResolvedValue({
+            data: {
+                lists: [{
+                    FileHash: 'fallback-hash',
+                    SongName: '爱河',
+                    Singers: [{ id: 7, name: '神马乐团' }],
+                    Duration: 226,
+                }],
+            },
+        });
+
+        const page = await kugouProvider.search!.searchSongs('爱河', 50, 0);
+
+        expect(warn).toHaveBeenCalledWith('[KugouProvider] authenticated search returned no items, retrying anonymously');
+        expect(anonymousSearchMock).toHaveBeenCalledWith('爱河', 1, 50);
+        expect(page.items[0]?.id).toBe('FALLBACK-HASH');
+    });
+
+    it('keeps the authenticated empty page when the anonymous retry is also empty', async () => {
+        requestMock.mockResolvedValue({ data: { lists: [] } });
+        anonymousSearchMock.mockResolvedValue({ data: { lists: [] } });
+
+        const page = await kugouProvider.search!.searchSongs('爱河', 50, 0);
+
+        expect(anonymousSearchMock).toHaveBeenCalledTimes(1);
+        expect(page.items).toEqual([]);
+    });
+
+    it('keeps the authenticated empty page when the anonymous retry throws', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        requestMock.mockResolvedValue({ data: { lists: [] } });
+        anonymousSearchMock.mockRejectedValue(new Error('KuGou anonymous search failed'));
+
+        const page = await kugouProvider.search!.searchSongs('匿名失败', 50, 0);
+
+        expect(page.items).toEqual([]);
+        expect(warn).toHaveBeenCalledWith('[KugouProvider] anonymous search retry failed', expect.any(Error));
+    });
+
+    it('does not retry anonymously on later pages', async () => {
+        requestMock.mockResolvedValue({ data: { lists: [] } });
+
+        await kugouProvider.search!.searchSongs('爱河', 50, 50);
+
+        expect(anonymousSearchMock).not.toHaveBeenCalled();
+    });
+
+    it('uses anonymous search on later pages after a first-page fallback', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        requestMock.mockResolvedValue({ data: { lists: [] } });
+        anonymousSearchMock.mockResolvedValue({
+            data: {
+                lists: [{
+                    FileHash: 'page-one-hash',
+                    SongName: '翻页回退',
+                    Singers: [{ id: 7, name: '神马乐团' }],
+                    Duration: 226,
+                }],
+            },
+        });
+        await kugouProvider.search!.searchSongs('翻页回退', 50, 0);
+
+        requestMock.mockClear();
+        anonymousSearchMock.mockClear();
+        anonymousSearchMock.mockResolvedValue({
+            data: {
+                lists: [{
+                    FileHash: 'page-two-hash',
+                    SongName: '翻页回退',
+                    Singers: [{ id: 7, name: '神马乐团' }],
+                    Duration: 226,
+                }],
+            },
+        });
+        const page = await kugouProvider.search!.searchSongs('翻页回退', 50, 50);
+
+        expect(requestMock).not.toHaveBeenCalled();
+        expect(anonymousSearchMock).toHaveBeenCalledWith('翻页回退', 2, 50);
+        expect(page.items[0]?.id).toBe('PAGE-TWO-HASH');
+    });
+
+    it('returns to the authenticated search when a marked keyword works again', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        requestMock.mockResolvedValue({ data: { lists: [] } });
+        anonymousSearchMock.mockResolvedValue({
+            data: {
+                lists: [{
+                    FileHash: 'fallback-hash',
+                    SongName: '恢复会话',
+                    Singers: [{ id: 7, name: '神马乐团' }],
+                    Duration: 226,
+                }],
+            },
+        });
+        await kugouProvider.search!.searchSongs('恢复会话', 50, 0);
+
+        requestMock.mockReset();
+        requestMock.mockResolvedValue({
+            data: {
+                lists: [{
+                    FileHash: 'session-hash',
+                    SongName: '恢复会话',
+                    Singers: [{ id: 7, name: '神马乐团' }],
+                    Duration: 226,
+                }],
+            },
+        });
+        anonymousSearchMock.mockClear();
+        await kugouProvider.search!.searchSongs('恢复会话', 50, 0);
+
+        requestMock.mockClear();
+        const page = await kugouProvider.search!.searchSongs('恢复会话', 50, 50);
+
+        expect(requestMock).toHaveBeenCalledWith('search', {
+            keywords: '恢复会话',
+            keyword: '恢复会话',
+            type: 'song',
+            page: 2,
+            pagesize: 50,
+        });
+        expect(anonymousSearchMock).not.toHaveBeenCalled();
+        expect(page.items[0]?.id).toBe('SESSION-HASH');
+    });
+
     it('normalizes Hash identity and keeps only stable provider data', () => {
         const song = normalizeKugouSong({
             FileHash: 'ab12cd',
@@ -131,11 +288,46 @@ describe('kugouProvider', () => {
                 mixSongId: 42,
                 catalogLookupId: 42,
                 albumId: 9,
+                // The adapter keeps the lyric ids beside the source's data (sourceDtos.ts LYRIC_IDS_DATA_KEY).
+                '@lyricIds': { kugou: 'AB12CD' },
             },
         });
+        expect(song.kgHash).toBe('AB12CD');
         expect(song.artists[0]).toMatchObject({ id: 'kugou-artist-0', name: '歌手' });
         expect(song.artists[0].catalogRef).toBeUndefined();
-        expect(song.album.catalogRef).toEqual({ providerId: 'kugou', kind: 'album', id: 9 });
+        expect(song.album.catalogRef).toEqual({ providerId: 'kugou', kind: 'album', id: '9' });
+    });
+
+    // 专辑曲目：歌名带后缀，后缀另在 trans_param.songname_suffix，没有 OriSongName（2026-11-05 album_songs 实测）。
+    it('takes the suffix off an album track title and offers the rest as the lyric search alias', async () => {
+        const song = normalizeKugouSong({
+            hash: 'ab12cd',
+            base: { audio_name: '夜に駆ける (向夜晚奔去)', author_name: 'YOASOBI' },
+            trans_param: { songname_suffix: '(向夜晚奔去)' },
+            authors: [{ author_name: 'YOASOBI' }],
+            album_info: { album_name: '夜に駆ける' },
+        });
+
+        expect(song.name).toBe('夜に駆ける (向夜晚奔去)');
+        expect(song.sourceRef).toMatchObject({ providerData: { originalName: '夜に駆ける' } });
+        await expect(kugouProvider.lyrics!.getSearchAlias!(song)).resolves.toEqual({
+            song, title: '夜に駆ける', artist: 'YOASOBI', album: '夜に駆ける',
+        });
+    });
+
+    // 搜索条目没有 SongName：歌名取自 OriSongName，本来就是原名（2026-11-04 实测）。
+    it('offers no alias when the title already is OriSongName', async () => {
+        const song = normalizeKugouSong({
+            FileHash: 'ab12cd',
+            FileName: 'YOASOBI - 夜に駆ける (向夜晚奔去)',
+            OriSongName: '夜に駆ける',
+            Suffix: '(向夜晚奔去)',
+            SingerName: 'YOASOBI',
+        });
+
+        expect(song.name).toBe('夜に駆ける');
+        expect(song.sourceRef).not.toHaveProperty('providerData.originalName');
+        await expect(kugouProvider.lyrics!.getSearchAlias!(song)).resolves.toBeNull();
     });
 
     it('keeps a high-resolution canonical KuGou cover for templates and sized CDN URLs', () => {
@@ -198,8 +390,12 @@ describe('kugouProvider', () => {
 
         const result = await kugouProvider.lyrics?.getLyrics(song);
 
-        expect(result?.lyrics?.isWordByWord).toBe(true);
-        expect(result?.lyrics?.lines[0]?.fullText).toBe('测试');
+        // The source hands the KRC text on, as the main and the word-by-word track; the host parses it.
+        expect(result).toMatchObject({
+            mainText: '[1000,2000]<0,800,0>测<800,1200,0>试',
+            wordByWordText: '[1000,2000]<0,800,0>测<800,1200,0>试',
+            isPureMusic: false,
+        });
         expect(requestMock).toHaveBeenCalledWith('search_lyric', {
             hash: 'LYRIC-HASH',
             duration: 3000,
@@ -215,7 +411,7 @@ describe('kugouProvider', () => {
         expect(song.album.coverUrl).toBe('https://imge.kugou.com/stdmusic/1024/cover.jpg');
     });
 
-    it('rejects non-empty KRC payloads that contain no lyric lines', async () => {
+    it('does not ask for the chorus of a KRC payload without a timed line', async () => {
         requestMock.mockImplementation(async (operation: string) => {
             if (operation === 'search_lyric') {
                 return { candidates: [{ id: 'metadata-only', accesskey: 'observed-access-key' }] };
@@ -233,7 +429,7 @@ describe('kugouProvider', () => {
 
         const result = await kugouProvider.lyrics?.getLyrics(song);
 
-        expect(result?.lyrics).toBeNull();
+        expect(result?.lyrics ?? null).toBeNull();
         expect(result?.isPureMusic).toBe(false);
         expect(requestMock).not.toHaveBeenCalledWith('song_climax', expect.anything());
     });
@@ -249,19 +445,21 @@ describe('kugouProvider', () => {
             Duration: 240,
         });
 
-        const metadata = kugouProvider.songMetadata?.getSongMetadata(song);
+        // A source's song metadata is read off its song (sourceMembers.ts: songMetadata 'dto').
+        expect(kugouProvider.songMetadata).toBeUndefined();
+        const metadata = createProviderSongMetadata(song);
 
         expect(metadata).toMatchObject({
             artists: [{
-                id: 7,
+                id: '7',
                 name: '歌手',
-                catalogRef: { providerId: 'kugou', kind: 'artist', id: 7 },
+                catalogRef: { providerId: 'kugou', kind: 'artist', id: '7' },
             }],
             album: {
-                id: 9,
+                id: '9',
                 name: '专辑',
                 coverUrl: 'https://example.test/cover.jpg',
-                catalogRef: { providerId: 'kugou', kind: 'album', id: 9 },
+                catalogRef: { providerId: 'kugou', kind: 'album', id: '9' },
             },
             durationMs: 240_000,
             coverUrl: 'https://example.test/cover.jpg',
@@ -289,7 +487,7 @@ describe('kugouProvider', () => {
         expect(song.name).toBe('挪德卡莱 Nod-Krai');
         expect(song.artists.map(artist => artist.name)).toEqual(['HOYO-MiX', 'AURORA']);
         expect(song.album).toMatchObject({
-            id: 164446399,
+            id: '164446399',
             name: '原神-幽暮衬映之月 Outside It Is Growing Dark',
         });
     });
@@ -315,8 +513,8 @@ describe('kugouProvider', () => {
 
         await expect(kugouProvider.auth?.createQr?.('key')).resolves.toBe('data:image/png;base64,abc');
         expect(requestMock).toHaveBeenNthCalledWith(1, 'login_qr_create', { key: 'key', qrimg: true });
-        await expect(kugouProvider.auth?.checkQr?.('key')).resolves.toEqual({ state: 'scanned' });
-        await expect(kugouProvider.auth?.checkQr?.('key')).resolves.toEqual({ state: 'confirmed' });
+        await expect(kugouProvider.auth?.checkLogin?.('key')).resolves.toEqual({ state: 'scanned' });
+        await expect(kugouProvider.auth?.checkLogin?.('key')).resolves.toEqual({ state: 'confirmed' });
     });
 
     it('accepts the user id returned with user details', async () => {
@@ -549,6 +747,145 @@ describe('kugouProvider', () => {
         expect(source?.url).toBe('http://fs.example.test/primary.mp3');
     });
 
+    // The privileged endpoint (/song/url/new): the stand-in answers like main without a VIP credential unless set.
+    describe('privileged URL', () => {
+        const song = () => normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
+        const ordinary = { data: { url: 'https://example.test/ordinary.mp3' } };
+
+        it('is asked before /song/url for a signed-in account, and its URL array is read by place', async () => {
+            songUrlNewMock.mockReturnValue({ data: { url: ['https://example.test/128.mp3', 'https://example.test/320.mp3'], priv_status: 1 } });
+            requestMock.mockResolvedValue(ordinary);
+
+            const source = await kugouProvider.playback!.getAudioSource(song(), 'high');
+
+            expect(songUrlNewMock).toHaveBeenCalledWith(expect.objectContaining({ hash: 'hash' }));
+            expect(requestMock).not.toHaveBeenCalled();
+            expect(source).toMatchObject({ url: 'https://example.test/320.mp3', quality: 'high' });
+        });
+
+        it('is not asked without a signed-in account', async () => {
+            signInKugouHint(null);
+            requestMock.mockResolvedValue(ordinary);
+
+            await kugouProvider.playback!.getAudioSource(song(), 'high');
+
+            expect(songUrlNewMock).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            ['not entitled', { url: ['https://example.test/preview.mp3'], priv_status: 0 }],
+            ['without a priv_status', { url: ['https://example.test/unmarked.mp3'] }],
+            ['an encrypted container', { url: ['https://example.test/song.kgm'], priv_status: 1 }],
+            ['marked for purchase', { url: ['https://example.test/buy.mp3'], priv_status: 1, fail_process: ['buy'] }],
+            ['too small for the track', { url: ['https://example.test/short.mp3'], priv_status: 1, fileSize: 100 * 1024 }],
+        ])('falls back to /song/url when its answer is %s', async (_label, data) => {
+            songUrlNewMock.mockReturnValue({ data });
+            requestMock.mockResolvedValue(ordinary);
+
+            const source = await kugouProvider.playback!.getAudioSource(song(), 'high');
+
+            expect(source?.url).toBe('https://example.test/ordinary.mp3');
+            expect(source?.preview).toBeUndefined();
+        });
+
+        it('takes a lower tier of its answer when the asked one is an encrypted container', async () => {
+            songUrlNewMock.mockReturnValue({ data: {
+                url: ['https://example.test/128.mp3', 'https://example.test/320.mp3', 'https://example.test/song.mflac'], priv_status: 1,
+            } });
+            requestMock.mockResolvedValue({ data: {} });
+
+            const source = await kugouProvider.playback!.getAudioSource(song(), 'lossless');
+
+            expect(source).toMatchObject({ url: 'https://example.test/320.mp3', quality: 'high' });
+        });
+
+        it('falls back to /song/url when it fails', async () => {
+            songUrlNewMock.mockRejectedValue(new Error('KuGouApi[operation=song_url_new status=502]'));
+            requestMock.mockResolvedValue(ordinary);
+
+            const source = await kugouProvider.playback!.getAudioSource(song(), 'high');
+
+            expect(source?.url).toBe('https://example.test/ordinary.mp3');
+        });
+
+        it('keeps the better of a degraded privileged answer and /song/url', async () => {
+            songUrlNewMock.mockReturnValue({ data: { url: 'https://example.test/128.mp3', priv_status: 1, bitRate: 128000, extName: 'mp3' } });
+            requestMock.mockResolvedValue({ data: { url: 'https://example.test/flac.flac', quality: 'flac' } });
+
+            const source = await kugouProvider.playback!.getAudioSource(song(), 'lossless');
+
+            expect(source).toMatchObject({ url: 'https://example.test/flac.flac', quality: 'lossless' });
+        });
+
+        it('says the quality a single URL carries by its own figures, and asks /song/url no lower than that', async () => {
+            songUrlNewMock.mockReturnValue({ data: { url: 'https://example.test/audio.mp3', priv_status: 1, bitRate: 320000, extName: 'mp3' } });
+            requestMock.mockResolvedValue({ data: {} });
+
+            const source = await kugouProvider.playback!.getAudioSource(song(), 'lossless');
+
+            expect(source).toMatchObject({ url: 'https://example.test/audio.mp3', quality: 'high' });
+            // Only lossless could still beat it.
+            expect(requestMock.mock.calls.map(call => call[1].quality)).toEqual(['flac']);
+        });
+    });
+
+    it('says the quality an answer carries by its bitrate when the duration is in milliseconds', async () => {
+        requestMock.mockResolvedValue({ data: { url: 'https://example.test/audio.mp3', fileSize: 3000000, timeLength: 200000, bitRate: 320000, extName: 'mp3' } });
+        const source = await kugouProvider.playback!.getAudioSource(normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' }), 'high');
+        expect(source?.quality).toBe('high');
+        expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a silently degraded answer while a lower quality is asked whether it can do better', async () => {
+        requestMock
+            .mockResolvedValueOnce({ data: { url: 'https://example.test/128.mp3', quality: '128' } })
+            .mockResolvedValueOnce({ data: { url: 'https://example.test/flac.flac', quality: 'flac' } });
+        const source = await kugouProvider.playback!.getAudioSource(normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' }), 'hires');
+        expect(requestMock.mock.calls.map(call => call[1].quality)).toEqual(['high', 'flac']);
+        expect(source).toMatchObject({ url: 'https://example.test/flac.flac', quality: 'lossless' });
+    });
+
+    it('plays a degraded answer already found when a later quality is asked to wait', async () => {
+        requestMock
+            .mockResolvedValueOnce({ data: { url: 'https://example.test/128.mp3', quality: '128' } })
+            .mockRejectedValueOnce(new Error('KuGouApi[operation=song_url status=429]'));
+        const source = await kugouProvider.playback!.getAudioSource(normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' }), 'hires');
+        expect(source).toMatchObject({ url: 'https://example.test/128.mp3', quality: 'standard' });
+    });
+
+    it('returns a degraded answer without asking qualities that cannot beat it', async () => {
+        requestMock.mockResolvedValue({ data: { url: 'https://example.test/320.mp3', quality: '320' } });
+        const source = await kugouProvider.playback!.getAudioSource(normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' }), 'lossless');
+        expect(requestMock).toHaveBeenCalledTimes(1);
+        expect(source).toMatchObject({ url: 'https://example.test/320.mp3', quality: 'high' });
+    });
+
+    it('skips a purchase preview at a high quality and asks a lower one', async () => {
+        requestMock
+            .mockResolvedValueOnce({ data: { url: 'https://example.test/preview.mp3', fail_process: ['buy'] } })
+            .mockResolvedValueOnce({ data: { url: 'https://example.test/full.mp3' } });
+        const source = await kugouProvider.playback!.getAudioSource(normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' }), 'high');
+        expect(source).toMatchObject({ url: 'https://example.test/full.mp3', quality: 'standard' });
+        expect(source?.preview).toBeUndefined();
+    });
+
+    it('tries the collection page context before the legacy endpoint', async () => {
+        requestMock.mockImplementation(async (_operation: string, params: Record<string, unknown>) => (
+            params.ppage_id === '356753938' ? { data: { url: 'https://example.test/collected.mp3' } } : { status: 3 }
+        ));
+        const source = await kugouProvider.playback!.getAudioSource(normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' }), 'standard');
+        expect(source?.url).toBe('https://example.test/collected.mp3');
+        expect(legacyPlayInfoMock).not.toHaveBeenCalled();
+    });
+
+    it('plays a standard purchase preview as a clip only when nothing gives the full track', async () => {
+        requestMock.mockResolvedValue({ data: { url: 'https://example.test/preview.mp3', fail_process: ['buy'] } });
+        legacyPlayInfoMock.mockResolvedValue({ status: 3 });
+        const source = await kugouProvider.playback!.getAudioSource(normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' }), 'standard');
+        expect(legacyPlayInfoMock).toHaveBeenCalledTimes(1);
+        expect(source).toMatchObject({ url: 'https://example.test/preview.mp3', preview: true });
+    });
+
     it('degrades unavailable qualities in order', async () => {
         requestMock
             .mockResolvedValueOnce({ data: {} })
@@ -610,202 +947,99 @@ describe('kugouProvider', () => {
         expect(source?.url).toBe('https://legacy.example.test/backup.mp3');
     });
 
-    it('rejects as not-playable with the attempts when the legacy mobile playInfo has no playable URL', async () => {
+    it('says KuGou gave no URL, with the last answer\'s status, when the legacy mobile playInfo has none either', async () => {
         requestMock.mockResolvedValue({ status: 3 });
         legacyPlayInfoMock.mockResolvedValue({ status: 3 });
         const song = normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
 
-        await expect(kugouProvider.playback!.getAudioSource(song, 'standard')).rejects.toMatchObject({
-            code: 'not-playable',
-            details: { attempts: expect.any(Array) },
-        });
+        const failure = await kugouProvider.playback!.getAudioSource(song, 'standard').catch((thrown: unknown) => thrown);
 
         expect(legacyPlayInfoMock).toHaveBeenCalledWith('HASH');
+        expect(failure).toMatchObject({ code: 'not-playable', providerId: 'kugou', cause: { status: 3 } });
+        expect(kugouProvider.describeFailure?.('audio', failure)).toEqual({ case: 'no-audio', code: '3' });
     });
 
-    describe('getAudioSource failure summary', () => {
-        const networkError = () => new OnlineProviderError('network', 'KuGou request failed (operation=song_url)', 'kugou');
-        const timeoutError = () => new OnlineProviderError(
-            'timeout',
-            'KuGou request timed out (operation=song_url): ETIMEDOUT: connect ETIMEDOUT 1.2.3.4:443',
-            'kugou',
-        );
-        const authError = () => new OnlineProviderError(
-            'auth-required',
-            'KuGou login required (operation=song_url status=502 error_code=152)',
-            'kugou',
-        );
+    // Which error getAudioSource throws when no URL comes; what it means is said in kugouFailure.ts.
+    describe('getAudioSource failure', () => {
+        // What the stand-in for main throws is the bridge's line (sources/kugou/main/kugouApiBridge.cjs normalizeBridgeError).
+        const networkError = () => new Error('KuGouApi[operation=song_url status=502]: ECONNRESET: socket hang up');
+        // A request that ran out of time.
+        const timeoutError = () => new Error('KuGouApi[operation=song_url]: ETIMEDOUT: connect ETIMEDOUT 1.2.3.4:443');
+        const authError = () => new Error('KuGouApi[operation=song_url status=502 error_code=152]');
         const metadataSong = () => normalizeKugouSong({
             FileHash: 'hash', SongName: 'Song', AlbumID: 164446399, album_audio_id: 500617606,
         });
+        const plainSong = () => normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
 
-        it('records every empty attempt and stays not-playable', async () => {
+        it('asks every level and variant, the collection context, then the legacy endpoint, and says no URL with KuGou\'s status', async () => {
             requestMock.mockResolvedValue({ status: 3, errcode: 0 });
             legacyPlayInfoMock.mockResolvedValue({ status: 0 });
 
             const error = await kugouProvider.playback!.getAudioSource(metadataSong(), 'high').catch(caught => caught);
 
-            expect(error).toBeInstanceOf(OnlineProviderError);
-            expect(error).toMatchObject({ code: 'not-playable', providerId: 'kugou', details: { stage: 'audio-source' } });
-            expect(error.details.attempts).toEqual([
-                { stage: 'song_url', outcome: 'empty', quality: 'high', variant: 'metadata', upstreamCode: 0, detail: 'status=3' },
-                { stage: 'song_url', outcome: 'empty', quality: 'high', variant: 'hash-only', upstreamCode: 0, detail: 'status=3' },
-                { stage: 'song_url', outcome: 'empty', quality: 'standard', variant: 'metadata', upstreamCode: 0, detail: 'status=3' },
-                { stage: 'song_url', outcome: 'empty', quality: 'standard', variant: 'hash-only', upstreamCode: 0, detail: 'status=3' },
-                { stage: 'legacy_play_info', outcome: 'empty', detail: 'status=0' },
-            ]);
-            expect(error.details.signInMayHelp).toBe(false);
+            // Two levels by two variants, then the collection context once.
+            expect(requestMock).toHaveBeenCalledTimes(5);
+            expect(requestMock).toHaveBeenLastCalledWith('song_url', expect.objectContaining({ ppage_id: '356753938' }));
+            expect(legacyPlayInfoMock).toHaveBeenCalledTimes(1);
+            // errcode 0 is KuGou saying no error: the status is the code quoted.
+            expect(kugouProvider.describeFailure?.('audio', error)).toEqual({ case: 'no-audio', code: '3' });
         });
 
-        it('hints that signing in may help when no session exists and every attempt was empty', async () => {
-            transportState.hasAuthenticatedSearchSession = false;
+        it('says signing in may help when no URL came and no account is signed in, also past a legacy HTTP error', async () => {
+            signInKugouHint(null);
             requestMock.mockResolvedValue({ status: 3 });
-            legacyPlayInfoMock.mockResolvedValue({ status: 3 });
-            const song = normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
+            legacyPlayInfoMock.mockRejectedValue(kugouHttpAnswer(403));
 
-            await expect(kugouProvider.playback!.getAudioSource(song, 'standard')).rejects.toMatchObject({
-                code: 'not-playable',
-                details: { signInMayHelp: true },
-            });
+            const error = await kugouProvider.playback!.getAudioSource(plainSong(), 'standard').catch(caught => caught);
+
+            expect(kugouProvider.describeFailure?.('audio', error)).toEqual({ case: 'no-audio', code: '3', likelyCause: 'sign-in' });
         });
 
-        it('does not hint at signing in when nothing came back empty', async () => {
-            transportState.hasAuthenticatedSearchSession = false;
-            requestMock.mockRejectedValue(networkError());
-            legacyPlayInfoMock.mockRejectedValue(new OnlineProviderError('network', 'KuGou legacy playInfo failed: 502', 'kugou'));
-            const song = normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
-
-            await expect(kugouProvider.playback!.getAudioSource(song, 'standard')).rejects.toMatchObject({
-                code: 'network',
-                details: { signInMayHelp: false },
-            });
-        });
-
-        it('stops the song_url chain after auth-required and still uses a legacy URL', async () => {
-            requestMock.mockRejectedValue(authError());
-            legacyPlayInfoMock.mockResolvedValue({ status: 1, url: 'https://legacy.example.test/song.mp3' });
-
-            const source = await kugouProvider.playback!.getAudioSource(metadataSong(), 'hires');
-
-            expect(requestMock).toHaveBeenCalledTimes(1);
-            expect(legacyPlayInfoMock).toHaveBeenCalledWith('HASH');
-            expect(source).toMatchObject({ url: 'https://legacy.example.test/song.mp3', quality: 'standard' });
-        });
-
-        it('rejects auth-required when the legacy fallback also fails after an auth stop', async () => {
-            const sessionError = authError();
-            requestMock.mockRejectedValue(sessionError);
-            legacyPlayInfoMock.mockResolvedValue({ status: 3 });
-
-            const error = await kugouProvider.playback!.getAudioSource(metadataSong(), 'hires').catch(caught => caught);
-
-            expect(requestMock).toHaveBeenCalledTimes(1);
-            expect(error).toMatchObject({ code: 'auth-required', providerId: 'kugou' });
-            expect(error.details.attempts).toHaveLength(2);
-            expect(error.details.attempts[0]).toMatchObject({
-                stage: 'song_url', outcome: 'error', code: 'auth-required', quality: 'hires', variant: 'metadata',
-            });
-        });
-
-        it('concludes network when every attempt fails without an HTTP answer', async () => {
-            requestMock.mockRejectedValue(networkError());
-            legacyPlayInfoMock.mockRejectedValue(new OnlineProviderError(
-                'network', 'KuGou legacy playInfo failed: 502', 'kugou', undefined, undefined, undefined,
-                { stage: 'legacy_play_info' },
-            ));
-            const song = normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
-
-            const error = await kugouProvider.playback!.getAudioSource(song, 'lossless').catch(caught => caught);
-
-            expect(requestMock).toHaveBeenCalledTimes(3);
-            expect(error).toMatchObject({ code: 'network', providerId: 'kugou' });
-            expect(error.details.attempts).toHaveLength(4);
-            expect(error.details.attempts.at(-1)).toMatchObject({ stage: 'legacy_play_info', code: 'network' });
-        });
-
-        it('treats a legacy HTTP 404 after empty song_url answers as an answer, not a network failure', async () => {
-            requestMock.mockResolvedValue({ status: 3 });
-            legacyPlayInfoMock.mockRejectedValue(new OnlineProviderError(
-                'network', 'KuGou legacy playInfo failed: 404', 'kugou', undefined, 404, undefined,
-                { stage: 'legacy_play_info' },
-            ));
-            const song = normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
-
-            const error = await kugouProvider.playback!.getAudioSource(song, 'lossless').catch(caught => caught);
-
-            // The 404 is an answer, so the last-attempt rule decides: not-playable, never a network failure.
-            expect(error).toMatchObject({ code: 'not-playable', providerId: 'kugou' });
-            expect(error.httpStatus).toBeUndefined();
-            expect(error.details.attempts.at(-1)).toMatchObject({ stage: 'legacy_play_info', code: 'network', httpStatus: 404 });
-            const failure = classifyPlaybackError(error, { stage: 'resolve-url', providerId: 'kugou' });
-            expect(failure.reason).toBe('unknown');
-            expect(resolvePlaybackFailurePolicy(failure, 'play').autoRetryDelaysMs).toEqual([]);
-        });
-
-        it('keeps the sign-in hint when a legacy HTTP 403 follows empty answers without a session', async () => {
-            transportState.hasAuthenticatedSearchSession = false;
-            requestMock.mockResolvedValue({ status: 3 });
-            legacyPlayInfoMock.mockRejectedValue(new OnlineProviderError(
-                'network', 'KuGou legacy playInfo failed: 403', 'kugou', undefined, 403, undefined,
-                { stage: 'legacy_play_info' },
-            ));
-            const song = normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
-
-            const error = await kugouProvider.playback!.getAudioSource(song, 'standard').catch(caught => caught);
-
-            expect(error).toMatchObject({ code: 'not-playable', details: { signInMayHelp: true } });
-            expect(classifyPlaybackError(error, { stage: 'resolve-url', providerId: 'kugou' })).toMatchObject({
-                reason: 'unknown', hint: 'sign-in-may-help',
-            });
-        });
-
-        it('concludes network when an empty answer is followed by network failures', async () => {
+        it('throws the first request that failed where no answer came, without a sign-in hint', async () => {
+            signInKugouHint(null);
             requestMock
-                .mockResolvedValueOnce({ status: 3 })
+                .mockRejectedValueOnce(new Error('KuGouApi[operation=song_url status=502]: first'))
                 .mockRejectedValue(networkError());
-            legacyPlayInfoMock.mockResolvedValue({ status: 3 });
-            const song = normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
+            legacyPlayInfoMock.mockRejectedValue(new Error('ECONNRESET'));
 
-            await expect(kugouProvider.playback!.getAudioSource(song, 'lossless')).rejects.toMatchObject({
-                code: 'network',
-            });
-            expect(requestMock).toHaveBeenCalledTimes(3);
+            const error = await kugouProvider.playback!.getAudioSource(plainSong(), 'lossless').catch(caught => caught);
+            expect(error).toMatchObject({ code: 'network', providerId: 'kugou' });
+            expect((error as Error).message).toContain(': first');
+            expect(kugouProvider.describeFailure?.('audio', error)).toEqual({ httpStatus: 502, message: 'first' });
+            // Three levels, then the collection context.
+            expect(requestMock).toHaveBeenCalledTimes(4);
         });
 
-        it('stops the song_url chain after a timeout and only tries legacy', async () => {
-            requestMock.mockRejectedValue(timeoutError());
+        // KuGou's own answer says more than a request that failed after it.
+        it('says no URL where an answer without one came before requests that failed', async () => {
+            requestMock.mockResolvedValueOnce({ status: 3 }).mockRejectedValue(networkError());
             legacyPlayInfoMock.mockResolvedValue({ status: 3 });
+
+            await expect(kugouProvider.playback!.getAudioSource(plainSong(), 'lossless')).rejects.toMatchObject({ code: 'not-playable' });
+            expect(requestMock).toHaveBeenCalledTimes(4);
+        });
+
+        it('stops asking /song/url after a request ran out of time, and still asks the legacy endpoint once', async () => {
+            requestMock.mockRejectedValue(timeoutError());
+            legacyPlayInfoMock.mockRejectedValue(new Error('ECONNRESET'));
 
             const error = await kugouProvider.playback!.getAudioSource(metadataSong(), 'hires').catch(caught => caught);
 
             expect(requestMock).toHaveBeenCalledTimes(1);
             expect(legacyPlayInfoMock).toHaveBeenCalledTimes(1);
-            expect(error).toMatchObject({ code: 'timeout', providerId: 'kugou' });
+            expect(kugouProvider.describeFailure?.('audio', error)).toEqual({ case: 'unreachable' });
         });
 
-        it('throws after a single request when the KuGou service is not configured', async () => {
-            requestMock.mockRejectedValue(new OnlineProviderError(
-                'unavailable', 'VITE_KUGOU_API_BASE is not configured', 'kugou', undefined, undefined, undefined,
-                { stage: 'config', transient: false },
-            ));
+        // The web build's missing address and its 429 with Retry-After stop the chain the same way (kugouTransport.test.ts
+        // tests how the web transport says them); the desktop says these two.
+        it.each([
+            ['main has not loaded KuGouMusicApi', 'KuGouApi[operation=song_url api=unloaded]: Cannot find module', { case: 'local-service-stopped' }],
+            ['KuGou asks to wait', 'KuGouApi[operation=song_url status=429]', { httpStatus: 429 }],
+        ])('throws after a single request where %s', async (_label, bridgeLine, said) => {
+            requestMock.mockRejectedValue(new Error(bridgeLine));
 
-            await expect(kugouProvider.playback!.getAudioSource(metadataSong(), 'hires')).rejects.toMatchObject({
-                code: 'unavailable',
-                details: { transient: false },
-            });
-            expect(requestMock).toHaveBeenCalledTimes(1);
-            expect(legacyPlayInfoMock).not.toHaveBeenCalled();
-        });
-
-        it('throws after a single request when KuGouMusicApi rate-limits playback', async () => {
-            requestMock.mockRejectedValue(new OnlineProviderError(
-                'network', 'KuGouMusicApi request failed: 429', 'kugou', undefined, 429, 25_000,
-            ));
-
-            await expect(kugouProvider.playback!.getAudioSource(metadataSong(), 'hires')).rejects.toMatchObject({
-                code: 'rate-limited',
-                retryAfterMs: 25_000,
-            });
+            const error = await kugouProvider.playback!.getAudioSource(metadataSong(), 'hires').catch(caught => caught);
+            expect(kugouProvider.describeFailure?.('audio', error)).toEqual(said);
             expect(requestMock).toHaveBeenCalledTimes(1);
             expect(legacyPlayInfoMock).not.toHaveBeenCalled();
         });
@@ -814,19 +1048,18 @@ describe('kugouProvider', () => {
             requestMock
                 .mockResolvedValueOnce({ status: 3 })
                 .mockResolvedValueOnce({ data: { play_url: 'https://example.test/lossless.flac' } });
-            const song = normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' });
 
-            const source = await kugouProvider.playback!.getAudioSource(song, 'hires');
+            const source = await kugouProvider.playback!.getAudioSource(plainSong(), 'hires');
 
             expect(requestMock.mock.calls.map(call => call[1].quality)).toEqual(['high', 'flac']);
             expect(source).toMatchObject({ url: 'https://example.test/lossless.flac', quality: 'lossless' });
             expect(legacyPlayInfoMock).not.toHaveBeenCalled();
         });
 
-        it('never tries legacy for cloud songs and still summarizes the failure', async () => {
+        it('never asks the legacy endpoint for a cloud song', async () => {
             requestMock.mockRejectedValue(authError());
             const song = {
-                ...normalizeKugouSong({ FileHash: 'hash', SongName: 'Song' }),
+                ...plainSong(),
                 sourceRef: {
                     kind: 'online' as const,
                     providerId: 'kugou' as const,
@@ -836,10 +1069,8 @@ describe('kugouProvider', () => {
                 },
             };
 
-            await expect(kugouProvider.playback!.getAudioSource(song, 'high')).rejects.toMatchObject({
-                code: 'auth-required',
-                details: { attempts: [expect.objectContaining({ stage: 'user_cloud_url', variant: 'cloud' })] },
-            });
+            await expect(kugouProvider.playback!.getAudioSource(song, 'high')).rejects.toMatchObject({ code: 'auth-required' });
+            expect(requestMock.mock.calls.map(call => call[0])).toEqual(['user_cloud_url']);
             expect(legacyPlayInfoMock).not.toHaveBeenCalled();
         });
     });
@@ -871,10 +1102,10 @@ describe('kugouProvider', () => {
             album_audio_id: '32155307',
             fields: 'album_info,authors.base,base,audio_info',
         });
-        expect(first.album.catalogRef).toEqual({ providerId: 'kugou', kind: 'album', id: 10729818 });
+        expect(first.album.catalogRef).toEqual({ providerId: 'kugou', kind: 'album', id: '10729818' });
         expect(first.album.name).toBe('Canonical Album');
         expect(first.album.name).toBe('Canonical Album');
-        expect(first.artists[0].catalogRef).toEqual({ providerId: 'kugou', kind: 'artist', id: 6539 });
+        expect(first.artists[0].catalogRef).toEqual({ providerId: 'kugou', kind: 'artist', id: '6539' });
         expect(second.album.catalogRef).toEqual(first.album.catalogRef);
     });
 
@@ -896,12 +1127,12 @@ describe('kugouProvider', () => {
 
         const ref = await resolveSongCatalogRef(song, 'album', song.album);
 
-        expect(song.album.catalogRef).toEqual({ providerId: 'kugou', kind: 'album', id: 999999 });
+        expect(song.album.catalogRef).toEqual({ providerId: 'kugou', kind: 'album', id: '999999' });
         expect(requestMock).toHaveBeenCalledWith('krm_audio', {
             album_audio_id: '99887766',
             fields: 'album_info,authors.base,base,audio_info',
         });
-        expect(ref).toEqual({ providerId: 'kugou', kind: 'album', id: 10729818 });
+        expect(ref).toEqual({ providerId: 'kugou', kind: 'album', id: '10729818' });
     });
 
     it('rejects KRM metadata belonging to a different hash', async () => {
@@ -1033,7 +1264,7 @@ describe('kugouProvider', () => {
         ]));
         expect(playlists?.items.find(item => item.id === 'collection_3_user_2_0')).not.toHaveProperty('isOwned');
         expect(albums?.items).toEqual([
-            expect.objectContaining({ id: 987654, name: 'Favorite album', type: 'album', trackCount: 12 }),
+            expect.objectContaining({ id: '987654', name: 'Favorite album', type: 'album', trackCount: 12 }),
         ]);
         expect(requestMock).toHaveBeenNthCalledWith(1, 'user_playlist', { userid: 'user', page: 1, pagesize: 50 });
         expect(requestMock).toHaveBeenNthCalledWith(2, 'user_playlist', { userid: 'user', page: 1, pagesize: 50 });
@@ -1083,6 +1314,51 @@ describe('kugouProvider', () => {
         expect(addable).toEqual([expect.objectContaining({ id: 'created', isOwned: true })]);
         expect(playlists?.items.find(item => item.id === 'liked')).toEqual(expect.objectContaining({ isOwned: true }));
         expect(playlists?.items.find(item => item.id === 'album')).toBeUndefined();
+    });
+
+    // 外壳取自 2026-11-03 `/user/listen` 的实测回答（那个账号没有收听记录）；条目的字段照同一模块别的客户端在真账号上读到的样子写。
+    const listenAnswer = (lists: unknown[]) => ({
+        data: { data_date: 0, servertime: 1793709882, lists, total_history: lists.length, total_week: 0, hide_mixsongids: [] },
+        status: 1, error_code: 0,
+    });
+    const listenRow = (hash: string, listenCount: number) => ({
+        hash, name: `歌手 - 歌 ${hash}`, singername: '歌手', album_name: '专辑', album_audio_id: 12345678,
+        duration: 285309, image: 'http://imge.kugou.com/stdmusic/{size}/20210101/cover.jpg', listen_count: listenCount,
+    });
+
+    it('asks /user/listen type 0 for the last week and 1 for all time, an entry a span that has songs', async () => {
+        requestMock.mockImplementation(async (_operation: string, params: Record<string, unknown>) => listenAnswer(
+            params.type === 1 ? [listenRow('A1', 99), listenRow('B2', 3)] : [],
+        ));
+        const listener = { id: 'user', nickname: 'Listener' };
+
+        const entries = await kugouProvider.library!.getListeningRankCollections!(listener);
+
+        expect(requestMock.mock.calls).toEqual([
+            ['user_listen', { userid: 'user', type: 0 }],
+            ['user_listen', { userid: 'user', type: 1 }],
+        ]);
+        expect(entries).toEqual([expect.objectContaining({
+            providerId: 'kugou', id: 'listening-rank-all-user', type: 'listening_rank', listeningRank: 'all', trackCount: 2, creator: listener,
+        })]);
+        expect(entries[0].coverUrl).toMatch(/^https:\/\/.+cover\.jpg$/);
+    });
+
+    it("reads a ranking's songs in KuGou's order with their play counts", async () => {
+        requestMock.mockResolvedValue(listenAnswer([listenRow('A1', 99), listenRow('B2', 3), listenRow('C3', 1)]));
+        const entry = { providerId: 'kugou', id: 'listening-rank-week-user', type: 'listening_rank', name: 'Week', listeningRank: 'week' as const, creator: { id: 'user', nickname: 'Listener' } };
+
+        const page = await kugouProvider.catalog!.getListeningRankTracks!('week', 2, 0, entry);
+
+        expect(requestMock).toHaveBeenLastCalledWith('user_listen', { userid: 'user', type: 0 });
+        expect(page.items.map(song => [song.id, song.name, song.artists.map(artist => artist.name), song.durationMs, song.listenCount])).toEqual([
+            ['A1', '歌 A1', ['歌手'], 285309, 99],
+            ['B2', '歌 B2', ['歌手'], 285309, 3],
+        ]);
+        expect(page).toMatchObject({ total: 3, hasMore: true, nextOffset: 2 });
+
+        requestMock.mockResolvedValue({ data: { servertime: 1 }, status: 1, error_code: 0 });
+        await expect(kugouProvider.catalog!.getListeningRankTracks!('week', 2, 0, entry)).rejects.toMatchObject({ code: 'invalid-response' });
     });
 
     it('requests the user cloud with the logged-in user id and maps the cloud list payload', async () => {
@@ -1172,9 +1448,9 @@ describe('kugouProvider', () => {
         expect(page?.items[0]).toMatchObject({
             name: '先说谎的人 (0.8X)',
             artists: [{
-                id: 8893172,
+                id: '8893172',
                 name: '涵の心事.',
-                catalogRef: { providerId: 'kugou', kind: 'artist', id: 8893172 },
+                catalogRef: { providerId: 'kugou', kind: 'artist', id: '8893172' },
             }],
             album: {
                 id: '58271602',
@@ -1216,17 +1492,17 @@ describe('kugouProvider', () => {
             name: '小心思',
             durationMs: 169012,
             album: {
-                id: 10729818,
+                id: '10729818',
                 name: '小心思',
                 coverUrl: 'https://imge.kugou.com/stdmusic/1024/cover.jpg',
-                catalogRef: { providerId: 'kugou', kind: 'album', id: 10729818 },
+                catalogRef: { providerId: 'kugou', kind: 'album', id: '10729818' },
             },
             sourceRef: {
                 providerData: { albumAudioId: 115304862, catalogLookupId: 115304862 },
             },
         });
         expect(song?.artists[0].catalogRef).toEqual({
-            providerId: 'kugou', kind: 'artist', id: 748078,
+            providerId: 'kugou', kind: 'artist', id: '748078',
         });
     });
 
@@ -1289,17 +1565,17 @@ describe('kugouProvider', () => {
         const albums = await kugouProvider.catalog?.getArtistAlbums?.(6539, 50, 0);
 
         expect(detail).toMatchObject({
-            id: 6539,
+            id: '6539',
             name: '郁可唯',
             coverUrl: 'https://img/1024/artist.jpg',
             providerData: { musicSize: 100, albumSize: 20 },
         });
         expect(albums?.items[0]).toMatchObject({
-            id: 194920827,
+            id: '194920827',
             name: '见幸福',
             type: 'album',
             coverUrl: 'https://img/1024/album.jpg',
-            artists: [{ id: 6539, name: '郁可唯' }],
+            artists: [{ id: '6539', name: '郁可唯' }],
             publishedAt: Date.UTC(2020, 0, 1),
         });
         expect(requestMock).toHaveBeenNthCalledWith(2, 'artist_albums', {
@@ -1321,10 +1597,10 @@ describe('kugouProvider', () => {
         const detail = await kugouProvider.catalog?.getAlbumDetail?.(194920827);
 
         expect(detail).toMatchObject({
-            id: 194920827,
+            id: '194920827',
             name: '见幸福',
             description: 'Album biography',
-            artists: [{ id: 6539, name: '郁可唯' }],
+            artists: [{ id: '6539', name: '郁可唯' }],
         });
         expect(requestMock).toHaveBeenCalledWith('album_detail', { id: '194920827' });
     });
@@ -1406,9 +1682,9 @@ describe('kugouProvider', () => {
                 },
             });
 
-        const ids = await kugouProvider.library?.getLikedSongIds?.('user');
+        const liked = await kugouProvider.library?.getLikedSongIds?.('user');
 
-        expect(ids).toEqual(['ABC123', 'DEF456']);
+        expect(liked).toEqual({ ids: ['ABC123', 'DEF456'], whole: true });
         expect(requestMock).toHaveBeenNthCalledWith(1, 'user_playlist', {
             userid: 'user', page: 1, pagesize: 100,
         });
@@ -1441,10 +1717,11 @@ describe('kugouProvider', () => {
                 data: { count: 101, songs: [{ hash: 'paged-last', name: 'Last Song' }] },
             });
 
-        const ids = await kugouProvider.library?.getLikedSongIds?.('user');
+        const liked = await kugouProvider.library?.getLikedSongIds?.('user');
 
-        expect(ids).toHaveLength(101);
-        expect(ids?.at(-1)).toBe('PAGED-LAST');
+        expect(liked?.ids).toHaveLength(101);
+        expect(liked?.ids.at(-1)).toBe('PAGED-LAST');
+        expect(liked?.whole).toBe(true);
         expect(requestMock).toHaveBeenNthCalledWith(2, 'playlist_track_all', {
             id: 'collection_3_liked_test_paged', page: 1, pagesize: 100,
         });
@@ -1453,30 +1730,107 @@ describe('kugouProvider', () => {
         });
     });
 
-    it('returns liked songs with their playlist-local file id', async () => {
+    // What the liked list and its rows answer in the tests below: one liked playlist, one song in it.
+    const likedAnswers = (listid: number, collectionId: string, fileid: number) => async (endpoint: string) => (
+        endpoint === 'user_playlist'
+            ? { data: { info: [{ type: 0, source: 1, listid, name: '我喜欢', global_collection_id: collectionId }] } }
+            : endpoint === 'playlist_track_all'
+                ? { data: { count: 1, songs: [{ hash: 'abc123', name: 'Song 1', fileid }] } }
+                : {}
+    );
+    const asked = (endpoint: string) => requestMock.mock.calls.filter(call => call[0] === endpoint).length;
+
+    it('notes the row of each liked song it reads, and an unlike sends that row without reading the list again', async () => {
+        requestMock.mockImplementation(likedAnswers(2, 'collection_3_liked_test_songs', 987));
+        const liked = await kugouProvider.library?.getLikedSongIds?.('web-session-user');
+        expect(liked).toEqual({ ids: ['ABC123'], whole: true });
+
+        requestMock.mockClear();
+        const song = normalizeKugouSong({ hash: 'abc123', name: 'Song 1', album_id: 12, mixsongid: 34 });
+        await kugouProvider.mutations?.likeSong?.(song, false);
+        expect(requestMock.mock.calls).toEqual([['playlist_tracks_del', { listid: '2', fileids: '987' }]]);
+
+        // The row went with the unlike: the next one looks the song up in the list.
+        requestMock.mockClear();
+        await kugouProvider.mutations?.likeSong?.(song, false);
+        expect(asked('playlist_track_all')).toBe(1);
+    });
+
+    it('notes no row for a song an unlike was sent for while the list was read, and none for a song the list no longer shows', async () => {
+        const song = normalizeKugouSong({ hash: 'abc123', name: 'Song 1', album_id: 12, mixsongid: 34 });
+        requestMock.mockImplementation(likedAnswers(2, 'collection_3_liked_test_rows', 987));
+        await kugouProvider.library?.getLikedSongIds?.('web-session-user');
+
+        // A second read is under way when the unlike is sent; it still shows the song at its old row.
+        let answerList!: (value: unknown) => void;
+        requestMock.mockImplementation(async (endpoint: string) => (
+            endpoint === 'playlist_track_all' ? new Promise(resolve => { answerList = resolve; }) : likedAnswers(2, 'collection_3_liked_test_rows', 987)(endpoint)
+        ));
+        const read = kugouProvider.library?.getLikedSongIds?.('web-session-user');
+        await vi.waitFor(() => expect(asked('playlist_track_all')).toBe(2));
+        await kugouProvider.mutations?.likeSong?.(song, false);
+        expect(requestMock).toHaveBeenLastCalledWith('playlist_tracks_del', { listid: '2', fileids: '987' });
+        answerList({ data: { count: 1, songs: [{ hash: 'abc123', name: 'Song 1', fileid: 987 }] } });
+        await read;
+
+        // The row that read showed is not noted: once the adapter's short-lived copy of the list
+        // has aged, the list is asked where the song is now.
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(Date.now() + 11_000);
+        requestMock.mockClear();
+        requestMock.mockImplementation(likedAnswers(2, 'collection_3_liked_test_rows', 988));
+        await kugouProvider.mutations?.likeSong?.(song, false);
+        expect(asked('playlist_track_all')).toBe(1);
+        expect(requestMock).toHaveBeenLastCalledWith('playlist_tracks_del', { listid: '2', fileids: '988' });
+
+        // A read that shows other songs only leaves no row for this one.
+        requestMock.mockImplementation(likedAnswers(2, 'collection_3_liked_test_rows', 989));
+        await kugouProvider.library?.getLikedSongIds?.('web-session-user');
+        requestMock.mockImplementation(async (endpoint: string) => (
+            endpoint === 'playlist_track_all'
+                ? { data: { count: 1, songs: [{ hash: 'def456', name: 'Song 2', fileid: 5 }] } }
+                : likedAnswers(2, 'collection_3_liked_test_rows', 989)(endpoint)
+        ));
+        await kugouProvider.library?.getLikedSongIds?.('web-session-user');
+        requestMock.mockClear();
+        await kugouProvider.mutations?.likeSong?.(song, false);
+        expect(requestMock).not.toHaveBeenCalledWith('playlist_tracks_del', expect.anything());
+    });
+
+    it('reads the liked songs from KuGou again when they are read twice in a row', async () => {
+        const playlists = {
+            data: { info: [{ type: 0, source: 1, listid: 2, name: '我喜欢', global_collection_id: 'collection_3_liked_test_twice' }] },
+        };
         requestMock
-            .mockResolvedValueOnce({
-                data: {
-                    info: [{
-                        type: 0,
-                        source: 1,
-                        listid: 2,
-                        name: '我喜欢',
-                        global_collection_id: 'collection_3_liked_test_songs',
-                    }],
-                },
-            })
-            .mockResolvedValueOnce({
-                data: { count: 1, songs: [{ hash: 'abc123', name: 'Song 1', fileid: 987 }] },
-            });
+            .mockResolvedValueOnce(playlists)
+            .mockResolvedValueOnce({ data: { songs: [{ hash: 'abc123', name: 'Song 1' }] } })
+            .mockResolvedValueOnce(playlists)
+            // A song liked in KuGou's own app since the first read.
+            .mockResolvedValueOnce({ data: { songs: [{ hash: 'abc123', name: 'Song 1' }, { hash: 'def456', name: 'Song 2' }] } });
 
-        const songs = await kugouProvider.library?.getLikedSongs?.('user');
+        await kugouProvider.library?.getLikedSongIds?.('user');
+        const liked = await kugouProvider.library?.getLikedSongIds?.('user');
 
-        expect(songs).toHaveLength(1);
-        expect(songs?.[0]?.id).toBe('ABC123');
-        expect(songs?.[0]?.sourceRef?.kind === 'online'
-            ? songs?.[0]?.sourceRef.providerData?.fileId
-            : undefined).toBe(987);
+        expect(liked?.ids).toEqual(['ABC123', 'DEF456']);
+    });
+
+    it('counts the liked songs by the count the list of playlists gives for the liked list, and gives none where it names none', async () => {
+        requestMock.mockResolvedValueOnce({
+            data: {
+                info: [
+                    { type: 0, source: 1, listid: 8, name: '自建歌单', count: 4 },
+                    { type: 0, source: 1, listid: 2, name: '我喜欢', count: 12, global_collection_id: 'collection_3_liked_test_count' },
+                ],
+            },
+        });
+        await expect(kugouProvider.library?.getLikedSongCount?.('user')).resolves.toBe(12);
+        expect(requestMock.mock.calls).toEqual([['user_playlist', { userid: 'user', page: 1, pagesize: 100 }]]);
+
+        // The liked list without a count, and a list of playlists without the liked list.
+        requestMock.mockResolvedValueOnce({ data: { info: [{ type: 0, source: 1, listid: 2, name: '我喜欢' }] } });
+        await expect(kugouProvider.library?.getLikedSongCount?.('user')).resolves.toBeNull();
+        requestMock.mockResolvedValueOnce({ data: { info: [{ type: 0, source: 1, listid: 8, name: '自建歌单', count: 4 }] } });
+        await expect(kugouProvider.library?.getLikedSongCount?.('user')).resolves.toBeNull();
     });
 
     it('adds liked songs through the liked playlist mutation endpoint', async () => {
@@ -1550,37 +1904,11 @@ describe('kugouProvider', () => {
         });
     });
 
-    it('uses the cached liked file id without scanning the whole liked playlist', async () => {
-        requestMock
-            .mockResolvedValueOnce({
-                data: {
-                    info: [{
-                        type: 0,
-                        source: 1,
-                        listid: 2,
-                        name: '我喜欢',
-                        global_collection_id: 'collection_3_liked_test_cached',
-                    }],
-                },
-            })
-            .mockResolvedValueOnce({});
-
-        const song = normalizeKugouSong({
-            hash: 'abc123',
-            name: 'Song 1',
-            album_id: 12,
-            mixsongid: 34,
+    it('gives the account a cloud entry without asking KuGou for it', async () => {
+        await expect(kugouProvider.library?.getCloudCollection?.({ id: 'user', nickname: 'Listener', avatarUrl: 'avatar.jpg' })).resolves.toMatchObject({
+            providerId: 'kugou', id: 'cloud', type: 'cloud', coverUrl: 'avatar.jpg',
         });
-        await kugouProvider.mutations?.likeSong?.(song, false, { likedFileId: 987 });
-
-        expect(requestMock).toHaveBeenCalledTimes(2);
-        expect(requestMock).toHaveBeenNthCalledWith(1, 'user_playlist', {
-            userid: 'web-session-user', page: 1, pagesize: 100,
-        });
-        expect(requestMock).toHaveBeenNthCalledWith(2, 'playlist_tracks_del', {
-            listid: '2', fileids: '987',
-        });
-        expect(requestMock).not.toHaveBeenCalledWith('playlist_track_all', expect.anything());
+        expect(requestMock).not.toHaveBeenCalled();
     });
 
     it('treats an unlike as done when the liked playlist does not contain the song', async () => {
@@ -1849,71 +2177,55 @@ describe('kugouProvider', () => {
                 : { data: { count: 10_000_000, songs: fullPage } }
         ));
 
-        await expect(kugouProvider.library?.getLikedSongs?.('user')).rejects.toMatchObject({
+        await expect(kugouProvider.library?.getLikedSongIds?.('user')).rejects.toMatchObject({
             code: 'invalid-response',
         });
     });
 
     it('stops reusing the liked playlist reference after a logout', async () => {
         const song = normalizeKugouSong({ hash: 'abc123', name: 'Song 1', album_id: 12, mixsongid: 34 });
-        requestMock
-            .mockResolvedValueOnce({
-                data: { info: [{ type: 0, source: 1, listid: 2, name: '我喜欢', global_collection_id: 'collection_3_logout' }] },
-            })
-            .mockResolvedValueOnce({});
-        await kugouProvider.mutations?.likeSong?.(song, false, { likedFileId: 987 });
+        requestMock.mockImplementation(likedAnswers(2, 'collection_3_logout', 987));
+        await kugouProvider.mutations?.likeSong?.(song, false);
         expect(requestMock).toHaveBeenNthCalledWith(1, 'user_playlist', expect.anything());
 
         // 第二次取消收藏直接吃缓存，不再拉歌单列表——先证明缓存确实在用。
-        requestMock.mockReset();
-        requestMock.mockResolvedValueOnce({});
-        await kugouProvider.mutations?.likeSong?.(song, false, { likedFileId: 987 });
-        expect(requestMock).toHaveBeenCalledTimes(1);
-        expect(requestMock).toHaveBeenNthCalledWith(1, 'playlist_tracks_del', expect.anything());
+        requestMock.mockClear();
+        await kugouProvider.mutations?.likeSong?.(song, false);
+        expect(asked('user_playlist')).toBe(0);
+        expect(requestMock).toHaveBeenLastCalledWith('playlist_tracks_del', { listid: '2', fileids: '987' });
 
         requestMock.mockReset();
         requestMock.mockResolvedValue(undefined);
         await kugouProvider.auth?.logout?.();
+        // The sign-out took the account hint with it; the next account signs in.
+        signInKugouHint('web-session-user');
 
         requestMock.mockReset();
-        requestMock
-            .mockResolvedValueOnce({
-                data: { info: [{ type: 0, source: 1, listid: 9, name: '我喜欢', global_collection_id: 'collection_3_after_logout' }] },
-            })
-            .mockResolvedValueOnce({});
-        await kugouProvider.mutations?.likeSong?.(song, false, { likedFileId: 654 });
+        requestMock.mockImplementation(likedAnswers(9, 'collection_3_after_logout', 654));
+        await kugouProvider.mutations?.likeSong?.(song, false);
 
         expect(requestMock).toHaveBeenNthCalledWith(1, 'user_playlist', expect.anything());
-        expect(requestMock).toHaveBeenNthCalledWith(2, 'playlist_tracks_del', { listid: '9', fileids: '654' });
+        expect(requestMock).toHaveBeenLastCalledWith('playlist_tracks_del', { listid: '9', fileids: '654' });
     });
 
     it('stops reusing the liked playlist reference when the session user changes', async () => {
         const song = normalizeKugouSong({ hash: 'abc123', name: 'Song 1', album_id: 12, mixsongid: 34 });
-        requestMock
-            .mockResolvedValueOnce({
-                data: { info: [{ type: 0, source: 1, listid: 2, name: '我喜欢', global_collection_id: 'collection_3_user_a' }] },
-            })
-            .mockResolvedValueOnce({});
-        await kugouProvider.mutations?.likeSong?.(song, false, { likedFileId: 987 });
+        requestMock.mockImplementation(likedAnswers(2, 'collection_3_user_a', 987));
+        await kugouProvider.mutations?.likeSong?.(song, false);
 
-        requestMock.mockReset();
-        requestMock.mockResolvedValueOnce({});
-        await kugouProvider.mutations?.likeSong?.(song, false, { likedFileId: 987 });
-        expect(requestMock).toHaveBeenCalledTimes(1);
+        requestMock.mockClear();
+        await kugouProvider.mutations?.likeSong?.(song, false);
+        expect(asked('user_playlist')).toBe(0);
 
-        sessionState.userId = 'second-session-user';
+        signInKugouHint('second-session-user');
         requestMock.mockReset();
-        requestMock
-            .mockResolvedValueOnce({
-                data: { info: [{ type: 0, source: 1, listid: 7, name: '我喜欢', global_collection_id: 'collection_3_user_b' }] },
-            })
-            .mockResolvedValueOnce({});
-        await kugouProvider.mutations?.likeSong?.(song, false, { likedFileId: 321 });
+        requestMock.mockImplementation(likedAnswers(7, 'collection_3_user_b', 321));
+        await kugouProvider.mutations?.likeSong?.(song, false);
 
         expect(requestMock).toHaveBeenNthCalledWith(1, 'user_playlist', {
             userid: 'second-session-user', page: 1, pagesize: 100,
         });
-        expect(requestMock).toHaveBeenNthCalledWith(2, 'playlist_tracks_del', { listid: '7', fileids: '321' });
+        expect(requestMock).toHaveBeenLastCalledWith('playlist_tracks_del', { listid: '7', fileids: '321' });
     });
 
     it('fails the liked-songs read instead of reporting an empty library', async () => {
@@ -1921,7 +2233,7 @@ describe('kugouProvider', () => {
             data: { info: [{ type: 0, source: 1, listid: 2, name: '我的歌单' }] },
         });
 
-        await expect(kugouProvider.library?.getLikedSongs?.('user')).rejects.toMatchObject({
+        await expect(kugouProvider.library?.getLikedSongIds?.('user')).rejects.toMatchObject({
             code: 'invalid-response',
         });
     });
@@ -1937,19 +2249,15 @@ describe('kugouProvider', () => {
 
         // 残缺引用要是被缓存下来，下一次取消收藏就会跳过 user_playlist 直接失败，一直粘到登出。
         requestMock.mockReset();
-        requestMock
-            .mockResolvedValueOnce({
-                data: { info: [{ type: 0, source: 1, listid: 2, name: '我喜欢', global_collection_id: 'collection_3_recovered' }] },
-            })
-            .mockResolvedValueOnce({});
-        await kugouProvider.mutations?.likeSong?.(song, false, { likedFileId: 987 });
+        requestMock.mockImplementation(likedAnswers(2, 'collection_3_recovered', 987));
+        await kugouProvider.mutations?.likeSong?.(song, false);
 
         expect(requestMock).toHaveBeenNthCalledWith(1, 'user_playlist', expect.anything());
-        expect(requestMock).toHaveBeenNthCalledWith(2, 'playlist_tracks_del', { listid: '2', fileids: '987' });
+        expect(requestMock).toHaveBeenLastCalledWith('playlist_tracks_del', { listid: '2', fileids: '987' });
     });
 
     it('reports an auth error instead of a silent success when the session has no user id', async () => {
-        sessionState.userId = '';
+        signInKugouHint('');
         const song = normalizeKugouSong({ hash: 'abc123', name: 'Song 1', album_id: 12, mixsongid: 34 });
 
         // 静默 return 会被 omni 当成 mutation 成功，心形照样翻转。
@@ -1969,5 +2277,19 @@ describe('kugouProvider', () => {
             code: 'invalid-response',
         });
         expect(requestMock).not.toHaveBeenCalledWith('playlist_tracks_add', expect.anything());
+    });
+});
+
+describe('kugouPlaybackUrl', () => {
+    it('plays an http address of the file hosts as given on the desktop, over https on the web', () => {
+        const url = 'http://fs.youthandroid2.kugou.com/path/song.mp3';
+        expect(kugouPlaybackUrl(url, 'electron')).toBe(url);
+        expect(kugouPlaybackUrl(url, 'web')).toBe('https://fs.youthandroid2.kugou.com/path/song.mp3');
+    });
+
+    it('leaves other hosts, https addresses and what is not a URL alone', () => {
+        expect(kugouPlaybackUrl('http://other.kugou.com/song.mp3', 'web')).toBe('http://other.kugou.com/song.mp3');
+        expect(kugouPlaybackUrl('https://fs.youthandroid2.kugou.com/song.mp3', 'web')).toBe('https://fs.youthandroid2.kugou.com/song.mp3');
+        expect(kugouPlaybackUrl('not a url', 'web')).toBe('not a url');
     });
 });

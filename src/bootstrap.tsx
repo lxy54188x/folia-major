@@ -9,16 +9,21 @@ import ObsBrowserSourceApp from './components/obs/ObsBrowserSourceApp';
 import ObsNowPlayingSourceApp from './components/obs/ObsNowPlayingSourceApp';
 import ObsPlayerCapSourceApp from './components/obs/ObsPlayerCapSourceApp';
 import { initializeLocalCoverRuntime } from './services/localCoverRuntime';
-import { initFoliumClients } from './mods/folium/clientLoader';
-import { restoreSavedFoliumSelections } from './mods/folium/missingEntries';
-import { installFoliumCommandPaletteSync } from './mods/folium/commandPaletteSync';
-import { installFoliumHostEvents } from './mods/folium/hostEvents';
+import { installFoliumHomePageDismissal } from './components/app/home/foliumHomePageDismissal';
 import { installLibrarySuiteChromeCommands } from './library/app/installLibrarySuiteChromeCommands';
+import { installProviderSearchCommands } from './components/command-palette/providerSearchCommandsInstaller';
+import { installSourceSwitchCommands } from './components/command-palette/sourceSwitchCommandsInstaller';
+import { installSongNoteTagCommands } from './components/command-palette/songNoteTagCommandsInstaller';
+import { isModsBridgeAvailable } from './mods/ipc';
+import { registerWebSources } from './services/onlineMusic/web';
+import { noteFoliumFirstScreenMounted, startFoliumForMainWindow } from './mods/runtime/mainWindowStart';
 import { installNativeDragGuard } from './utils/nativeDragGuard';
+import { prewarmSavedVisualizer, prewarmVisualizersWhenIdle } from './components/visualizer/prewarmVisualizers';
 import { bootNavidromeServerPreset } from './services/navidromeServerPreset';
 import { isNavidromeEnabled } from './services/navidromeService';
 import { setNavidromeEnabledState } from './stores/useLibraryStore';
-import { isMainAppSurface, isObsBrowserSourceSurface, isRemoteControlSurface, obsSourceKind } from './utils/appSurface';
+import { installUiZoom } from './services/uiZoomRuntime';
+import { isMainAppSurface, isObsBrowserSourceSurface, isPerfCheckSurface, isRemoteControlSurface, obsSourceKind } from './utils/appSurface';
 // 副作用 import：store 在模块加载时就把 `<html data-reduce-motion>` 写好并保持同步。放在 bootstrap
 // 而不是 App 里，是因为下面按 URL 挂的根不止 App —— 远程控制窗口的进度辉光也读这个属性。
 import './stores/useMotionSettingsStore';
@@ -31,7 +36,14 @@ import './stores/useMotionSettingsStore';
 // stored mode. The store initializes eagerly through the static import graph,
 // so the mode it read may already have fallen back to a builtin; after mod
 // clients register their entries we restore the saved selections
-// (src/mods/folium/missingEntries.ts, which also re-runs on every mod reload).
+// (src/mods/runtime/missingEntries.ts, which also re-runs on every mod reload).
+//
+// So the first screen waits for the mods' clients, but not for long: all of
+// them together get FIRST_SCREEN_MOD_WAIT_MS. A mod that is not up by then
+// keeps starting behind the first screen, and its saved style or background
+// comes back when it is (src/mods/runtime/mainWindowStart.ts). The cap is here
+// and nowhere else: the export window waits for its mods in full.
+const FIRST_SCREEN_MOD_WAIT_MS = 1500;
 
 // #394: with a selection on the page, native drag-and-drop would hijack slider gestures. Installed
 // here, for every surface this bundle mounts, rather than inside App so the remote-control and OBS
@@ -44,6 +56,8 @@ if (!rootElement) {
 }
 
 const root = ReactDOM.createRoot(rootElement);
+// The performance check's window, loaded only there.
+const PerfCheckApp = React.lazy(() => import('./components/perfCheck/PerfCheckApp'));
 const isObsBrowserSource = isObsBrowserSourceSurface;
 // obsSource=now-playing / playercap: static OBS overlay that connects directly to NowPlaying / PlayerCap in the browser (no Electron SSE relay).
 const isNowPlayingObsSource = isObsBrowserSource && obsSourceKind === 'now-playing';
@@ -53,6 +67,17 @@ const isRemoteControl = isRemoteControlSurface;
 // also has the Electron bridge, but mod state pushes only reach the main
 // window, so a client activated there would never be torn down.
 const isMainApp = isMainAppSurface;
+
+// Its effect runs after the effects of everything inside it in the same commit, so by then every
+// mod `mount` of the first screen has returned: the moment the mods' start counts as over.
+const FirstScreenMounted: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    React.useEffect(() => {
+        noteFoliumFirstScreenMounted();
+        prewarmVisualizersWhenIdle();
+    }, []);
+    return <>{children}</>;
+};
+
 const renderApp = () => root.render(
     <React.StrictMode>
       <AppSplashGate>
@@ -64,7 +89,9 @@ const renderApp = () => root.render(
               ? <ObsBrowserSourceApp />
               : isRemoteControl
                 ? <RemoteControlApp />
-                : <App />}
+                : isPerfCheckSurface
+                  ? <React.Suspense fallback={null}><PerfCheckApp /></React.Suspense>
+                  : <FirstScreenMounted><App /></FirstScreenMounted>}
       </AppSplashGate>
     </React.StrictMode>
   );
@@ -73,13 +100,28 @@ const renderApp = () => root.render(
 // registry, so the commands are put into its list here, before anything renders (main window only,
 // like the mod commands below). A clashing execute shortcut throws here, at startup.
 if (isMainApp) installLibrarySuiteChromeCommands();
+// The web build has no mod runtime: its three platforms are registered here, in every window, before
+// anything renders (Folium 2.0 plan §8, services/onlineMusic/web/). The desktop gets them from their source mods.
+if (!isModsBridgeAvailable()) registerWebSources();
+// One search command per registered online source (no default platform), put in again when the sources change.
+if (isMainApp) installProviderSearchCommands();
+// One command per state each source can be switched to (Settings → Sources), following the main process's states.
+if (isMainApp) installSourceSwitchCommands();
+// One #tag command per song-note tag (opens the scratchpad's Moments sheet at that tag), following the tags.
+if (isMainApp) installSongNoteTagCommands();
+
+// 界面缩放（#1264）在首屏渲染前套上，免得先按 100% 排一遍版再缩。只缩主窗口。
+if (isMainApp) installUiZoom();
+
+// 保存的歌词样式可以趁首屏加载遮罩还在时先准备（雾笺在后台编着色器，见 visualizer/prewarmVisualizers.ts）。
+// 不等它，和下面的 mod 加载一起跑；别的启动慢的样式等首屏出来、页面空闲时再准备（FirstScreenMounted）。
+if (isMainApp) prewarmSavedVisualizer();
 
 const bootFolium = async () => {
     if (!isMainApp) return;
-    installFoliumCommandPaletteSync();
-    installFoliumHostEvents();
-    await initFoliumClients();
-    restoreSavedFoliumSelections();
+    // 显式打开集合时关掉开着的模组首页页面；与 Home 挂没挂着无关，所以在这里装（见 foliumHomePageDismissal）。
+    installFoliumHomePageDismissal();
+    await startFoliumForMainWindow({ firstScreenWaitMs: FIRST_SCREEN_MOD_WAIT_MS });
 };
 
 // Docker 预置的 Navidrome 凭据要在渲染前落进 localStorage（原因见 services/navidromeServerPreset.ts）。
@@ -98,6 +140,8 @@ void Promise.allSettled([bootFolium(), bootNavidrome()])
         if (navidrome.status === 'rejected') console.warn('[Navidrome] Server preset boot failed:', navidrome.reason);
     })
     .finally(() => {
-        initializeLocalCoverRuntime();
+        // Not in the performance check's window: the cover migration it may start writes through a
+        // first-party channel (the main window runs it).
+        if (!isPerfCheckSurface) initializeLocalCoverRuntime();
         renderApp();
     });

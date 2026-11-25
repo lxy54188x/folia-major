@@ -18,7 +18,7 @@
     --bravais-stack-page-near: color-mix(in srgb, var(--bg-color, #070707) 66%, var(--lattice-poster-ink));
     --bravais-stack-page-far: color-mix(in srgb, var(--bg-color, #070707) 80%, var(--lattice-poster-ink));
     --bravais-stack-page-line: color-mix(in srgb, var(--bg-color, #070707) 72%, #000);
-    /* 叠色（默认渐变的右下端那一色；自定义叠色用自定义色）与熄灯（82% 黑，日光白；全透明档改为整体压到 0.28）。 */
+    /* 叠色（默认渐变的右下端那一色；自定义叠色用自定义色）与熄灯（82% 黑，日光下也是黑；全透明档改为整体压到 0.28）。 */
     --bravais-stack-tint: 0%;
     --bravais-stack-tint-color: color-mix(in srgb, var(--bg-color, #070707) 84%, var(--text-secondary, #6a48ff));
     --bravais-stack-dim: 0%;
@@ -36,7 +36,6 @@
     --bravais-stack-page-near: color-mix(in srgb, var(--bg-color, #fafaf9) 80%, var(--lattice-poster-ink));
     --bravais-stack-page-far: color-mix(in srgb, var(--bg-color, #fafaf9) 88%, var(--lattice-poster-ink));
     --bravais-stack-page-line: color-mix(in srgb, var(--bg-color, #fafaf9) 62%, var(--lattice-poster-ink));
-    --bravais-stack-dim-color: #fff;
 }
 
 .bravais-root.has-stack-edges .bravais-tile-face.is-stack {
@@ -144,4 +143,19 @@
 :root[data-reduce-motion~='lattice'] .bravais-tile-duo::after,
 :root[data-reduce-motion~='lattice'] .bravais-tile-face.is-stack {
     transition: none;
+}
+
+/* ---------- 探索：section 标题（bravaisWallShape 的探索形状） ---------- */
+
+/* 与网格探索墙的标题磁贴（LatticeSections.css 的 .lattice-heading）同一个样子：没有图，海报底色上一行序号、标题与这一段的
+   种类；不是条目，悬停不抬起、指针是默认的。 */
+.lattice-poster.bravais-tile-face.is-heading {
+    cursor: default;
+    color: var(--lattice-poster-ink);
+    background: var(--lattice-poster-background);
+}
+
+.bravais-tile:hover > .bravais-tile-face.is-heading,
+.bravais-tile.is-focused > .bravais-tile-face.is-heading {
+    transform: none;
 }

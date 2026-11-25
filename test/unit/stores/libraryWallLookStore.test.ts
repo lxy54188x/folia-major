@@ -20,8 +20,11 @@ import type { useLibraryWallLookStore as StoreHook } from '@/stores/useLibraryWa
 const LOOK_KEY = 'library_wall_look';
 const WINDOWS_KEY = 'library_wall_windows_per_block';
 const STACK_EDGES_KEY = 'library_wall_stack_edges';
+const COLLECTION_TILT_KEY = 'library_wall_collection_tilt';
+const HOME_FINITE_KEY = 'library_wall_home_finite';
 const SEAM_CLEAR_KEY = 'library_wall_seam_clear';
 const SEAM_STYLE_KEY = 'library_wall_seam_style';
+const SEAM_DIRECTION_KEY = 'library_wall_seam_direction';
 const BACKDROP_LYRICS_KEY = 'library_wall_backdrop_lyrics';
 const BACKDROP_BLUR_KEY = 'library_wall_backdrop_blur';
 
@@ -211,6 +214,36 @@ describe('useLibraryWallLookStore', () => {
         expect((await loadStore({ [STACK_EDGES_KEY]: 'false' }, { throwOnGet: true })).getState().collectionStackEdges).toBe(true);
     });
 
+    it('tilts collection pages by default and persists turning it off', async () => {
+        const store = await loadStore();
+        expect(store.getState().collectionTilt).toBe(true);
+        expect(storage.size).toBe(0);
+
+        store.getState().setCollectionTilt(false);
+        expect(storage.get(COLLECTION_TILT_KEY)).toBe('false');
+        const restarted = await loadStore(Object.fromEntries(storage));
+        expect(restarted.getState().collectionTilt).toBe(false);
+
+        // 只认 'false' 为关；读不到或别的值按默认（开）。
+        expect((await loadStore({ [COLLECTION_TILT_KEY]: 'nope' })).getState().collectionTilt).toBe(true);
+        expect((await loadStore({ [COLLECTION_TILT_KEY]: 'false' }, { throwOnGet: true })).getState().collectionTilt).toBe(true);
+    });
+
+    it('keeps the home wall infinite by default and persists the finite-only switch', async () => {
+        const store = await loadStore();
+        expect(store.getState().homeFinite).toBe(false);
+        expect(storage.size).toBe(0);
+
+        store.getState().setHomeFinite(true);
+        expect(storage.get(HOME_FINITE_KEY)).toBe('true');
+        const restarted = await loadStore(Object.fromEntries(storage));
+        expect(restarted.getState().homeFinite).toBe(true);
+
+        // 只认 'true' 为开；读不到或别的值按默认（关）。
+        expect((await loadStore({ [HOME_FINITE_KEY]: 'yes' })).getState().homeFinite).toBe(false);
+        expect((await loadStore({ [HOME_FINITE_KEY]: 'true' }, { throwOnGet: true })).getState().homeFinite).toBe(false);
+    });
+
     // 2026-10-09：信息条的材质与墙后的画面。信息条始终透明默认开（用户定，只认 'false' 为关）；歌词 / 模糊默认关、
     // 只认 'true'；预设默认主题纸色，非法值回默认。
     it('keeps the info strip clear and the backdrop plain by default, and persists the changes', async () => {
@@ -239,5 +272,23 @@ describe('useLibraryWallLookStore', () => {
         expect((await loadStore({ [SEAM_CLEAR_KEY]: 'false' })).getState().seamClear).toBe(false);
         expect((await loadStore({ [SEAM_CLEAR_KEY]: 'false' }, { throwOnGet: true })).getState().seamClear).toBe(true);
         expect((await loadStore({ [BACKDROP_BLUR_KEY]: 'true' }, { throwOnGet: true })).getState().backdropBlur).toBe(false);
+    });
+
+    // 信息条方向：默认自动（按视口形状）；三个取值以外的回默认后再写，读不到也按默认。
+    it('opens the info strip by the screen shape by default and persists a fixed direction', async () => {
+        const store = await loadStore();
+        expect(store.getState().seamDirection).toBe('auto');
+        expect(storage.size).toBe(0);
+
+        store.getState().setSeamDirection('horizontal');
+        expect(storage.get(SEAM_DIRECTION_KEY)).toBe('horizontal');
+        const restarted = await loadStore(Object.fromEntries(storage));
+        expect(restarted.getState().seamDirection).toBe('horizontal');
+
+        restarted.getState().setSeamDirection('sideways' as never);
+        expect(storage.get(SEAM_DIRECTION_KEY)).toBe('auto');
+        expect((await loadStore({ [SEAM_DIRECTION_KEY]: 'Vertical' })).getState().seamDirection).toBe('auto');
+        expect((await loadStore({ [SEAM_DIRECTION_KEY]: 'vertical' })).getState().seamDirection).toBe('vertical');
+        expect((await loadStore({ [SEAM_DIRECTION_KEY]: 'vertical' }, { throwOnGet: true })).getState().seamDirection).toBe('auto');
     });
 });

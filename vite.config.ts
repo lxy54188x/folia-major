@@ -3,8 +3,11 @@ import { fileURLToPath } from 'url';
 import { type ConfigEnv, type UserConfig, type ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import { commandPinyinPlugin } from './dev/pinyin/commandPinyinPlugin.mjs';
+import { traditionalLocalePlugin } from './dev/i18n/traditionalLocalePlugin.mjs';
+import { webSourcePlugin } from './dev/sources/webSourcePlugin.mjs';
 import { icuFoliaDataPlugin } from './dev/icuFolia/icuFoliaDataPlugin.mjs';
-import { normalizeBuildCommit, resolveBuildKind, resolveBuildRepo } from './dev/build/buildIdentity.mjs';
+import { nebbiaStrokesPlugin } from './dev/nebbia/nebbiaStrokesPlugin.mjs';
+import { normalizeBuildCommit, resolveBuildKind, resolveBuildRepo, resolveDevBuildKindOverride } from './dev/build/buildIdentity.mjs';
 import { VitePWA } from 'vite-plugin-pwa';
 import { execSync } from 'child_process';
 import { createHash } from 'crypto';
@@ -184,7 +187,8 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
   const buildRepo = resolveBuildRepo(process.env, () => execSync('git remote get-url origin', { stdio: ['ignore', 'pipe', 'ignore'] }).toString());
   const buildCommit = normalizeBuildCommit(commitHash);
   // 官方 / 自部署 / 非官方：设置里的版本号、扫码诊断报告和反馈入口都会读它
-  const buildKind = resolveBuildKind(process.env);
+  // 开发服务器可以用 FOLIA_DEV_BUILD_KIND 钉住（Playwright 用）；vite build 不认这个变量。
+  const buildKind = resolveDevBuildKindOverride(_config.command, process.env) ?? resolveBuildKind(process.env);
 
   const appVersionLabel = process.env.APP_VERSION_LABEL?.trim() || 'Realeco';
   const appReleaseChannel = process.env.APP_RELEASE_CHANNEL?.trim().toLowerCase() || 'realeco';
@@ -206,6 +210,9 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
       format: 'es'
     },
     optimizeDeps: {
+      // The app's own pages only. Left to its default (every **/*.html under the root) the startup
+      // dep scan also crawls each git worktree under .claude/worktrees, a whole copy of the app apiece.
+      entries: ['*.html'],
       // Only metadataParser.worker.ts imports music-metadata, and the startup dep scan does not
       // follow worker entries. Left out, the first local import discovers it at runtime, Vite
       // re-optimizes, and every open page is force-reloaded ("optimized dependencies changed").
@@ -259,13 +266,21 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
         // extracting Electron into release/win-unpacked.tmp and renaming it to release/win-unpacked.
         // On Windows that rename fails with EPERM while anything holds the directory - so a dev
         // server left running in another terminal kills every `npm run build:electron`.
-        ignored: ['**/release/**', '**/models/**'],
+        // .claude holds the git worktrees of parallel sessions, each a full checkout of the repo:
+        // watched, they cost one handle per file (hundreds of thousands on Windows), and setting
+        // those up starves the dev server for minutes before it answers the first page.
+        // dist-mods/ is the build output of the source mods (dev/sources/build.mjs --watch rewrites it); the app's
+        // main process reloads it, the page never imports it.
+        ignored: ['**/release/**', '**/models/**', '**/.claude/**', '**/dist-mods/**'],
       },
     },
     plugins: [
       devLyricProxyPlugin(),
       commandPinyinPlugin(),
+      traditionalLocalePlugin(),
+      webSourcePlugin(),
       icuFoliaDataPlugin(),
+      nebbiaStrokesPlugin(),
       react(),
       VitePWA({
         registerType: 'autoUpdate',
@@ -326,6 +341,8 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
+        // 音源模组共用的纯函数（packages/folium-source-kit），宿主和 sources/ 都从包的入口取。
+        '@folia/folium-source-kit': path.resolve(__dirname, './packages/folium-source-kit/src/index.ts'),
       }
     }
   };

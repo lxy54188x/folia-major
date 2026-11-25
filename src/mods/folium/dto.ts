@@ -12,11 +12,13 @@ import { buildLineRenderHints, getLineRenderHints } from '@/utils/lyrics/renderH
 import { isValidWordSegmentation } from '@/utils/lyrics/wordSegmentation';
 import { getLineBackgroundVocals } from '@/components/visualizer/harmonyRuntime';
 import { getPlaybackSourceRef } from '@/utils/appPlaybackGuards';
+import type { OnlineFailureCaseId } from '@/types/onlineMusic';
 import type {
     FoliumBackgroundVocal,
     FoliumLine,
     FoliumLyricAlternateText,
     FoliumLyricSyllable,
+    FoliumPlaybackFailureReason,
     FoliumSong,
     FoliumTheme,
     FoliumWord,
@@ -160,20 +162,36 @@ const describeSource = (song: SongResult): string | null => {
  * (playSong, enqueue, beforePlay.replaceWith) without ever holding a
  * SongResult. The same host object always gets the same token; the map is
  * bounded, so a token for a long-gone song eventually stops resolving.
+ * Eviction is least recently handed out, not oldest minted: a reused token
+ * moves to the end of the map, so minting the rest of one getQueue page (at
+ * most 500 songs, well under the bound) can never evict a token that same
+ * page has just returned.
  */
-const MAX_SONG_REFS = 2000;
+/**
+ * How many song refs stay resolvable (Folium 1.7: 5,000, up from 2,000). `folium.omni` pages
+ * (searches, lookups, an album's songs) share the pool with the queue, so one mod reading many pages
+ * must not push out the refs the queue and other mods hold; one call still returns far fewer.
+ */
+export const FOLIUM_SONG_REF_POOL_SIZE = 5000;
+/** How every song ref begins; `folium.omni` tells a song DTO from a collection DTO by it. */
+export const FOLIUM_SONG_REF_PREFIX = 'song-';
 const refBySong = new WeakMap<SongResult, string>();
 const songByRef = new Map<string, SongResult>();
 let refCounter = 0;
 
 const refFor = (song: SongResult): string => {
     const existing = refBySong.get(song);
-    if (existing && songByRef.has(existing)) return existing;
+    if (existing && songByRef.has(existing)) {
+        // Map keeps insertion order: delete and set again to mark the token as just used.
+        songByRef.delete(existing);
+        songByRef.set(existing, song);
+        return existing;
+    }
     refCounter += 1;
-    const ref = `song-${refCounter.toString(36)}`;
+    const ref = `${FOLIUM_SONG_REF_PREFIX}${refCounter.toString(36)}`;
     refBySong.set(song, ref);
     songByRef.set(ref, song);
-    if (songByRef.size > MAX_SONG_REFS) {
+    if (songByRef.size > FOLIUM_SONG_REF_POOL_SIZE) {
         const oldest = songByRef.keys().next().value;
         if (oldest !== undefined) songByRef.delete(oldest);
     }
@@ -196,6 +214,35 @@ export const toFoliumSong = (song: SongResult | null | undefined): FoliumSong | 
         ref: refFor(song),
     };
 };
+
+// Host reason codes are not API: mods see five coarse classes. A Record so a new host reason fails
+// the type check until it is classed here.
+const FOLIUM_PLAYBACK_FAILURE_REASONS: Readonly<Record<OnlineFailureCaseId, FoliumPlaybackFailureReason>> = Object.freeze({
+    'sign-in-needed': 'auth',
+    'account-refused': 'restricted',
+    'subscription-required': 'restricted',
+    'purchase-required': 'restricted',
+    'entitlement-required': 'restricted',
+    'preview-only': 'restricted',
+    'region-restricted': 'restricted',
+    'not-public': 'restricted',
+    'taken-down': 'taken-down',
+    unreachable: 'network',
+    'local-service-stopped': 'network',
+    'retry-later': 'network',
+    'not-configured': 'unknown',
+    'no-audio': 'unknown',
+    'audio-unplayable': 'unknown',
+    refused: 'unknown',
+    unknown: 'unknown',
+});
+
+/** The coarse Folium class of a host failure reason; no reason (a path without one) is `unknown`. */
+export const toFoliumPlaybackFailureReason = (reason: OnlineFailureCaseId | null | undefined): FoliumPlaybackFailureReason => (
+    reason && Object.prototype.hasOwnProperty.call(FOLIUM_PLAYBACK_FAILURE_REASONS, reason)
+        ? FOLIUM_PLAYBACK_FAILURE_REASONS[reason]
+        : 'unknown'
+);
 
 /** Song DTO from the title/artist pair visualizers receive (no SongResult there). */
 export const toFoliumSongFromMeta = (
@@ -305,10 +352,16 @@ const CHORUS_EFFECTS = new Set(['bars', 'circles', 'beams']);
  * left in place keeps its original host Line; a new or edited one is rebuilt
  * from its DTO fields, each checked on the way in. Render hints are never
  * taken from the mod: the host recomputes them from the rebuilt timing, and a
- * word split that no longer joins back to the text is dropped.
+ * word split that no longer joins back to the text is dropped. A rebuilt
+ * chorus line keeps where its chorus came from (Line.chorusOrigin, which mods
+ * do not see) from the original chorus line that started at the same time;
+ * one with no such line counts as guessed.
  */
 export const fromFoliumLines = (original: readonly Line[], originalDtos: readonly FoliumLine[], next: readonly FoliumLine[]): Line[] => {
     const indexByDto = new Map(originalDtos.map((dto, index) => [dto, index] as const));
+    const chorusOriginByStart = new Map(original
+        .filter((line) => line.isChorus && line.chorusOrigin)
+        .map((line) => [line.startTime, line.chorusOrigin] as const));
     const lines: Line[] = [];
     next.forEach((dto) => {
         const index = indexByDto.get(dto);
@@ -341,6 +394,10 @@ export const fromFoliumLines = (original: readonly Line[], originalDtos: readonl
             ...optionalNumber('blockIndex', dto.blockIndex),
             ...optionalBoolean('isChorus', dto.isChorus),
             ...(CHORUS_EFFECTS.has(dto.chorusEffect as string) ? { chorusEffect: dto.chorusEffect } : {}),
+            // A chorus line the mod moved or marked itself is not one the lyric data vouches for: guessed.
+            ...(dto.isChorus === true
+                ? { chorusOrigin: chorusOriginByStart.get(dto.startTime) ?? 'text' }
+                : {}),
             ...(backgroundVocals ? { backgroundVocals } : {}),
             ...(wordSegments ? { wordSegments } : {}),
         };

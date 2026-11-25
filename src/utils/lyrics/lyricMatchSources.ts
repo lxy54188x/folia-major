@@ -1,23 +1,24 @@
 import { getOnlineMusicProvider } from '../../services/onlineMusic/providerRegistry';
+import { isParticipantReady } from '../../services/onlineMusic/crossSource';
 import type { AmllDbPlatform, LyricData, LyricProviderSource, SongResult } from '../../types';
 import { calculateMatchScore } from './matchScore';
-import { searchQQLyrics, fetchQQLyrics } from './providers/qqLyricProvider';
 import { fetchAmllDbLyrics, getAmllDbMusicIds, searchAmllDbSongs } from './providers/amllDbProvider';
 import { buildAmllDbSearchQueries, toAmllDbSongResults } from './amllDbCandidates';
-import { applyNeteaseChorusByTime } from './chorusEffects';
+import { applyChorusRangesByTime } from './chorusEffects';
 import { hasRenderableLyrics } from './validity';
+import { getLyricSourceOwnAccess, type LyricMatchSearchTarget, type LyricSourceAccess, type LyricSourceLyrics } from './lyricSources';
 
 // src/utils/lyrics/lyricMatchSources.ts
+// How each lyric source of lyricSources.ts is searched and fetched: for the match windows, for
+// the automatic pick and for the metadata search. A platform source is reached through its
+// provider, unless its own folder registered how else (registerLyricSourceAccess); AMLL DB, the
+// host's own source, is reached here.
+
+export type { LyricMatchSearchTarget, LyricSourceAccess, LyricSourceLyrics };
 
 const AMLL_DB_SEARCH_PAGE_SIZE = 50;
 const AMLL_DB_MAX_RESULTS = 20;
-
-export type LyricMatchSearchTarget = {
-    title: string;
-    artist: string;
-    durationMs: number;
-    album?: string;
-};
+const MATCH_WINDOW_SEARCH_LIMIT = 50;
 
 export type LyricMatchFetchResult = {
     lyrics: LyricData | null;
@@ -25,7 +26,20 @@ export type LyricMatchFetchResult = {
     matchedLyricsProviderPlatform?: AmllDbPlatform;
 };
 
-export const LYRIC_MATCH_SOURCES: readonly LyricProviderSource[] = ['netease', 'amll', 'qq', 'kugou'];
+// Whether the source takes part in the lyric match now (crossSource.ts): its platform is there and set up,
+// and signed in where it answers only with an account. A source that is not registered does not.
+export const isLyricMatchSourceOffered = (source: LyricProviderSource): boolean => isParticipantReady('lyrics', source);
+
+// The online platform AMLL DB keeps a lyric under, by AMLL DB's own name for it: its chorus ranges are that
+// platform's to give.
+const AMLL_DB_PLATFORM_SOURCES: Record<AmllDbPlatform, LyricProviderSource> = { ncm: 'netease', qq: 'qq' };
+
+/** The chorus ranges of the song `songId` as the platform AMLL DB kept it under has them; none while that platform is not there. */
+export const getAmllDbPlatformChorusRanges = async (platform: AmllDbPlatform, songId: number | string) => {
+    const source = AMLL_DB_PLATFORM_SOURCES[platform];
+    if (!isLyricMatchSourceOffered(source)) return [];
+    return await getOnlineMusicProvider(source)?.lyrics?.getChorusRanges?.(songId) ?? [];
+};
 
 const sortByMatchScore = (songs: SongResult[], target: LyricMatchSearchTarget) => (
     [...songs].sort((a, b) => calculateMatchScore(target, b) - calculateMatchScore(target, a))
@@ -54,68 +68,69 @@ export async function searchAmllDbLyricCandidates(
     return [];
 }
 
+// The AMLL DB lyric of a candidate its search gave, with NetEase's chorus ranges when the lyric
+// was kept under a NetEase id and marks no chorus itself.
+async function fetchAmllDbCandidateLyrics(song: SongResult): Promise<LyricSourceLyrics | null> {
+    const platform = song.amllDbPlatform;
+    if (!platform) {
+        return null;
+    }
+    const fetchedLyrics = await fetchAmllDbLyrics(platform, getAmllDbMusicIds(platform, song));
+    const lyrics = hasRenderableLyrics(fetchedLyrics) ? fetchedLyrics : null;
+    // Only NetEase's ranges were ever asked for here (a QQ lyric's chorus comes with QQ's own fetch).
+    const chorusRanges = platform === 'ncm' && !hasChorusMarkers(lyrics)
+        ? await getAmllDbPlatformChorusRanges(platform, song.id)
+        : [];
+
+    return {
+        lyrics: lyrics && chorusRanges.length > 0
+            ? applyChorusRangesByTime(lyrics, chorusRanges)
+            : lyrics,
+        isPureMusic: false,
+        matchedLyricsProviderPlatform: platform,
+    };
+}
+
+// A platform source is searched and fetched through the provider registered under its id, and
+// knows a song by its id.
+const platformAccess = (providerId: LyricProviderSource): LyricSourceAccess => ({
+    search: async (query, limit) => (await getOnlineMusicProvider(providerId)?.search?.searchSongs(query, limit, 0))?.items ?? [],
+    fetch: async song => await getOnlineMusicProvider(providerId)?.lyrics?.getLyrics(song) ?? null,
+    songKey: song => String(song.id),
+});
+
+// AMLL DB is searched through its own API, by the words typed like the platforms (#515).
+const AMLL_DB_ACCESS: Partial<LyricSourceAccess> = {
+    search: (query, _limit, target) => searchAmllDbLyricCandidates(query, target),
+    fetch: song => fetchAmllDbCandidateLyrics(song),
+};
+
+/**
+ * How `source` is searched and fetched: as its platform, with what its own folder registered over that
+ * (registerLyricSourceAccess); AMLL DB as the host reaches it.
+ */
+export const getLyricSourceAccess = (source: LyricProviderSource): LyricSourceAccess => ({
+    ...platformAccess(source),
+    ...(source === 'amll' ? AMLL_DB_ACCESS : getLyricSourceOwnAccess(source)),
+});
+
 export async function searchLyricsByMatchSource(
     source: LyricProviderSource,
     query: string,
     target: LyricMatchSearchTarget,
 ): Promise<SongResult[]> {
-    if (source === 'netease') {
-        const page = await getOnlineMusicProvider('netease')?.search?.searchSongs(query, 50, 0);
-        return sortByMatchScore(page?.items || [], target);
-    }
-    if (source === 'qq') {
-        return sortByMatchScore(await searchQQLyrics(query), target);
-    }
-    if (source === 'kugou') {
-        const page = await getOnlineMusicProvider('kugou')?.search?.searchSongs(query, 50, 0);
-        return sortByMatchScore(page?.items || [], target);
-    }
-    return searchAmllDbLyricCandidates(query, target);
+    return sortByMatchScore(await getLyricSourceAccess(source).search(query, MATCH_WINDOW_SEARCH_LIMIT, target), target);
 }
 
 export async function fetchLyricsForMatchSource(
     source: LyricProviderSource,
     selectedResult: SongResult,
 ): Promise<LyricMatchFetchResult | null> {
-    if (source === 'netease') {
-        const result = await getOnlineMusicProvider('netease')?.lyrics?.getLyrics(selectedResult);
-        if (!result) return null;
-        return {
-            lyrics: hasRenderableLyrics(result.lyrics) ? result.lyrics : null,
-            isPureMusic: result.isPureMusic,
-        };
-    }
-    if (source === 'qq') {
-        const lyrics = await fetchQQLyrics(selectedResult);
-        return {
-            lyrics: hasRenderableLyrics(lyrics) ? lyrics : null,
-            isPureMusic: false,
-        };
-    }
-    if (source === 'kugou') {
-        const result = await getOnlineMusicProvider('kugou')?.lyrics?.getLyrics(selectedResult);
-        if (!result) return null;
-        return {
-            lyrics: hasRenderableLyrics(result.lyrics) ? result.lyrics : null,
-            isPureMusic: result.isPureMusic,
-        };
-    }
-
-    const platform = selectedResult.amllDbPlatform;
-    if (!platform) {
-        return null;
-    }
-    const fetchedLyrics = await fetchAmllDbLyrics(platform, getAmllDbMusicIds(platform, selectedResult));
-    const lyrics = hasRenderableLyrics(fetchedLyrics) ? fetchedLyrics : null;
-    const chorusRanges = platform === 'ncm' && !hasChorusMarkers(lyrics)
-        ? await getOnlineMusicProvider('netease')?.lyrics?.getChorusRanges?.(selectedResult.id) ?? []
-        : [];
-
+    const result = await getLyricSourceAccess(source).fetch(selectedResult, { chorusRanges: [] });
+    if (!result) return null;
     return {
-        lyrics: lyrics && chorusRanges.length > 0
-            ? applyNeteaseChorusByTime(lyrics, chorusRanges)
-            : lyrics,
-        isPureMusic: false,
-        matchedLyricsProviderPlatform: platform,
+        lyrics: hasRenderableLyrics(result.lyrics) ? result.lyrics : null,
+        isPureMusic: result.isPureMusic,
+        ...(result.matchedLyricsProviderPlatform ? { matchedLyricsProviderPlatform: result.matchedLyricsProviderPlatform } : {}),
     };
 }

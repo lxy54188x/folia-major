@@ -68,28 +68,40 @@ test.describe('lyric filter modal', () => {
         await expect(save).toBeEnabled();
     });
 
-    test('keeps both custom expressions when their features are disabled', async ({ mount, page }) => {
+    // 「删掉这些行」改成一条条规则以后不再有「启用行过滤」的总开关与单条表达式（规则列表的增删由单测覆盖）；
+    // 还留着的那一半：署名的自定义表达式在署名改成「始终显示」、输入框收起以后仍然存下来。
+    test('keeps the custom staff expression when credits are always shown', async ({ mount, page }) => {
         await mount('lyricFilterModal');
 
-        await page.getByRole('button', { name: 'Enable line filter' }).click();
-        await page.getByPlaceholder('Enter a regular expression').fill('^广告');
-        await page.getByRole('button', { name: 'Enable line filter' }).click();
         await page.getByPlaceholder('Leave empty to use the built-in dictionary').fill('^作词');
         await page.getByRole('button', { name: 'Always show' }).click();
         await page.getByRole('button', { name: 'Save' }).click();
 
         const saved = page.locator('[data-probe-saved-draft]');
-        await expect(saved).toHaveAttribute('data-probe-saved-draft', /"pattern":"\^广告"/);
-        await expect(saved).toHaveAttribute('data-probe-saved-draft', /"filterEnabled":false/);
+        await expect(saved).toHaveAttribute('data-probe-saved-draft', /"staffPolicy":"keep"/);
         await expect(saved).toHaveAttribute('data-probe-saved-draft', /"staffPattern":"\^作词"/);
     });
 });
 
 test.describe('lyric staff segmented pickers', () => {
-    const readGroupBackgrounds = (page: Page, group: 'policy' | 'absorb') =>
+    // 选中态由设置的共用控件画在按钮里面的元素上（一个框或一块底），按钮自己没有底色。
+    // 每个选项读的是它用到的文字颜色、看得见的底色和阴影各有哪几种，不数里面有几个元素：
+    // 选中的那个只是多一个元素、却什么都没画出来时，三个选项读出来一样，这条就不过。
+    const readGroupPaint = (page: Page, group: 'policy' | 'absorb') =>
         sample(page, 'long-intro')
             .locator(`[data-staff-${group}-group] button[aria-pressed]`)
-            .evaluateAll(nodes => nodes.map(node => getComputedStyle(node).backgroundColor));
+            .evaluateAll(nodes => nodes.map((node) => {
+                const inks = new Set<string>();
+                const fills = new Set<string>();
+                for (const element of [node, ...node.querySelectorAll('span')]) {
+                    const style = getComputedStyle(element);
+                    if (style.opacity === '0') continue;
+                    inks.add(style.color);
+                    if (style.backgroundColor !== 'rgba(0, 0, 0, 0)') fills.add(style.backgroundColor);
+                    if (style.boxShadow !== 'none') fills.add(style.boxShadow);
+                }
+                return `${[...inks].sort().join(' ')} | ${[...fills].sort().join(' ')}`;
+            }));
 
     for (const group of ['policy', 'absorb'] as const) {
         test(`marks the selected ${group} option distinctly in both themes`, async ({ mount, page }) => {
@@ -101,9 +113,9 @@ test.describe('lyric staff segmented pickers', () => {
                     await expect(page.locator('[data-probe-daylight="true"]')).toBeVisible();
                 }
 
-                const backgrounds = await readGroupBackgrounds(page, group);
-                expect(backgrounds, `${group} / ${theme}`).toHaveLength(3);
-                expect(new Set(backgrounds).size, `${group} / ${theme}`).toBe(2);
+                const paints = await readGroupPaint(page, group);
+                expect(paints, `${group} / ${theme}`).toHaveLength(3);
+                expect(new Set(paints).size, `${group} / ${theme}`).toBe(2);
             }
         });
     }
@@ -113,10 +125,11 @@ test.describe('playback lyrics settings', () => {
     test('lists the lyric filtering entry next to the global timing offset', async ({ mount, page }) => {
         await mount('playbackLyricsSettings');
 
+        // A row that opens a dialog is a button named by the row's label; it has no text of its own.
         const lyricsCard = page.locator('section', { hasText: 'Global Timing Offset' }).last();
-        const entries = lyricsCard.locator('button', { hasText: /Global Timing Offset|Lyric Filtering/ });
+        const entries = lyricsCard.getByRole('button', { name: /Global Timing Offset|Lyric Filtering/ });
 
         await expect(entries).toHaveCount(2);
-        await expect(entries.nth(1)).toContainText('Lyric Filtering');
+        await expect(entries.nth(1)).toHaveAccessibleName('Lyric Filtering');
     });
 });

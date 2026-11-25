@@ -1,8 +1,8 @@
 import type { LocalSong, LyricProviderSource, SongResult } from '../types';
 import type { LocalSongMetadataSource } from '../types/localLibrary';
-import { getOnlineMusicProvider } from './onlineMusic/providerRegistry';
 import { getProviderSongMetadata } from './onlineMusic/songMetadata';
-import { searchQQLyrics } from '../utils/lyrics/providers/qqLyricProvider';
+import { getLyricSourceAccess } from '../utils/lyrics/lyricMatchSources';
+import { participants } from './onlineMusic/crossSource';
 import { calculateMatchScoreDetails } from '../utils/lyrics/matchScore';
 import { buildLyricSearchQuery } from '../utils/lyrics/searchQuery';
 import {
@@ -135,13 +135,7 @@ export async function searchOnlineMetadata(
     if (!safeQuery) return [];
     throwIfAborted(options.signal);
     const limit = options.limit ?? 10;
-    const results = source === 'netease' || source === 'kugou'
-        ? ((await waitForProvider(
-            getOnlineMusicProvider(source)?.search?.searchSongs(safeQuery, limit, 0)
-                || Promise.resolve({ items: [], hasMore: false, nextOffset: 0 }),
-            options.signal,
-        )).items as SongResult[])
-        : await waitForProvider(searchQQLyrics(safeQuery, 1, limit), options.signal);
+    const results = await waitForProvider(getLyricSourceAccess(source).search(safeQuery, limit, target), options.signal);
     throwIfAborted(options.signal);
     return results
         .map(result => normalizeOnlineMetadataCandidate(source, result, target))
@@ -149,28 +143,26 @@ export async function searchOnlineMetadata(
         .slice(0, limit);
 }
 
-// Preserves the established NetEase-to-QQ fallback and appends KuGou as the final provider-backed source.
+// Asks the sources that can match a local song (crossSource.ts) in their order - NetEase, QQ, KuGou while all
+// three are there - and takes the first whose best candidate matches the title. A source that is not there is
+// passed over, logged once. A source that fails hands on to the next, except the last, whose failure is the
+// answer; none there at all is no match.
 export async function findAutomaticOnlineMetadataCandidate(
     song: LocalSong,
     signal?: AbortSignal,
 ): Promise<OnlineMetadataCandidate | null> {
     const target = buildLocalSongMetadataSearchTarget(song);
     const query = buildLocalSongMetadataSearchQuery(song);
-    let neteaseCandidates: OnlineMetadataCandidate[] = [];
-    try {
-        neteaseCandidates = await searchOnlineMetadata('netease', query, target, { limit: 10, signal });
-    } catch (error) {
-        if ((error as Error).name === 'AbortError') throw error;
-        console.warn('[LocalMusic] NetEase metadata search failed, falling back to QQ:', error);
+    const sources = participants('metadata', { report: true }).ready as OnlineMetadataSource[];
+    for (const [index, source] of sources.entries()) {
+        const last = index === sources.length - 1;
+        try {
+            const candidates = await searchOnlineMetadata(source, query, target, { limit: 10, signal });
+            if (candidates[0]?.titleMatched) return candidates[0];
+        } catch (error) {
+            if (last || (error as Error).name === 'AbortError') throw error;
+            console.warn(`[LocalMusic] ${source} metadata search failed, falling back to ${sources[index + 1]}:`, error);
+        }
     }
-    if (neteaseCandidates[0]?.titleMatched) return neteaseCandidates[0];
-    try {
-        const qqCandidates = await searchOnlineMetadata('qq', query, target, { limit: 10, signal });
-        if (qqCandidates[0]?.titleMatched) return qqCandidates[0];
-    } catch (error) {
-        if ((error as Error).name === 'AbortError') throw error;
-        console.warn('[LocalMusic] QQ metadata search failed, falling back to KuGou:', error);
-    }
-    const kugouCandidates = await searchOnlineMetadata('kugou', query, target, { limit: 10, signal });
-    return kugouCandidates[0]?.titleMatched ? kugouCandidates[0] : null;
+    return null;
 }

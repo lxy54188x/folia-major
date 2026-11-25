@@ -5,6 +5,8 @@ import { formatGridMapFolderTitle } from '../../../../utils/gridMapFolderPath';
 import { getSizedCoverUrl } from '../../../../utils/coverUrl';
 import { useHomeLayoutSettingsStore } from '../../../../stores/useHomeLayoutSettingsStore';
 import { useReducedMotionFor } from '../../../../hooks/useReducedMotionFor';
+import { hasBlockingWindow } from '../../../../utils/keyboardTargets';
+import { CARD_TITLE_ATTR, MORPH_FRAME_ATTR } from '../transitions/gridMorphContract';
 
 // src/library/suites/grid/home/Grid3DSlider.tsx
 // Controlled desktop Grid3D slider shared by Netease, local music, and Navidrome overview surfaces.
@@ -31,6 +33,8 @@ interface Grid3DSliderProps {
     emptyMessage?: string;
     isDaylight: boolean;
     hasFloatingPlayer?: boolean;
+    /** 卡与卡之间的空隙（px）；缺省 GRID3D_CARD_GAP。首页 Folia 的标签页签给得更宽（用户定，和歌单区分开）。 */
+    cardGap?: number;
 }
 
 const compactDescription = (description?: string, maxLength = 72) => {
@@ -222,6 +226,7 @@ export const Grid3DSlider: React.FC<Grid3DSliderProps> = ({
     emptyMessage,
     isDaylight,
     hasFloatingPlayer = false,
+    cardGap = GRID3D_CARD_GAP,
 }) => {
     const { t } = useTranslation();
     const grid3dCardStyle = useHomeLayoutSettingsStore(state => state.grid3dCardStyle);
@@ -324,11 +329,11 @@ export const Grid3DSlider: React.FC<Grid3DSliderProps> = ({
 
     const { start: windowStart, end: windowEnd } = getGrid3DWindowRange(safeFocusedIndex, items.length);
     const windowedItems = items.slice(windowStart, windowEnd);
-    const cardPitch = coverSize + GRID3D_CARD_GAP;
+    const cardPitch = coverSize + cardGap;
     const leadingSpacerWidth = windowStart * cardPitch;
     const remainingItemCount = items.length - windowEnd;
     const trailingSpacerWidth = remainingItemCount > 0
-        ? remainingItemCount * coverSize + Math.max(0, remainingItemCount - 1) * GRID3D_CARD_GAP
+        ? remainingItemCount * coverSize + Math.max(0, remainingItemCount - 1) * cardGap
         : 0;
 
     const updateCardTransforms = useCallback(() => {
@@ -663,6 +668,8 @@ export const Grid3DSlider: React.FC<Grid3DSliderProps> = ({
         if (!isInteractive) return;
 
         const handleKeyDown = (event: KeyboardEvent) => {
+            // A window or a dialog over the page has the keyboard.
+            if (hasBlockingWindow()) return;
             const target = event.target;
             if (
                 target instanceof HTMLElement
@@ -816,7 +823,7 @@ export const Grid3DSlider: React.FC<Grid3DSliderProps> = ({
                                     key={item.id}
                                     data-grid3d-index={index}
                                     className="shrink-0 cursor-pointer pointer-events-auto select-none"
-                                    style={{ marginRight: index < items.length - 1 ? GRID3D_CARD_GAP : 0 }}
+                                    style={{ marginRight: index < items.length - 1 ? cardGap : 0 }}
                                     onClick={() => {
                                         if (!isInteractive || dragDistanceRef.current >= 8) return;
                                         if (isFocused) {
@@ -844,6 +851,7 @@ export const Grid3DSlider: React.FC<Grid3DSliderProps> = ({
                                         </div>
                                     ) : (
                                         <div
+                                            {...{ [MORPH_FRAME_ATTR]: '' }}
                                             className="rounded-xl border p-4 flex flex-col items-center backdrop-blur-md shadow-lg hover:shadow-2xl theme-polaroid-card"
                                             style={{ width: coverSize }}
                                         >
@@ -856,7 +864,7 @@ export const Grid3DSlider: React.FC<Grid3DSliderProps> = ({
                                             </div>
 
                                             <div className="w-full text-left pt-2 min-w-0">
-                                                <h3 className="font-bold text-sm truncate max-w-full tracking-tight">
+                                                <h3 {...{ [CARD_TITLE_ATTR]: '' }} className="font-bold text-sm truncate max-w-full tracking-tight">
                                                     {displayName}
                                                 </h3>
                                                 {secondaryText && (

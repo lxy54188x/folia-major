@@ -1,7 +1,7 @@
 import type React from 'react';
-import { LocalLibraryGroup, LocalSong, SongResult } from '../../../types';
+import { LocalLibraryGroup, LocalSong, SongResult, type UnifiedSong } from '../../../types';
 import { LIST_ROW_COVER_SIZE, buildLocalQueue } from '../../../services/playbackAdapters';
-import { sortLocalFolderSongs } from '../../../utils/localSongSorting';
+import { sortLocalAlbumSongs, sortLocalFolderSongs } from '../../../utils/localSongSorting';
 import type { LocalLibraryAssignment, LocalLibraryEntity } from '../../../types/localLibrary';
 import type { OnlineProviderId } from '../../../types/onlineMusic';
 import type {
@@ -10,9 +10,11 @@ import type {
     NavidromeGridViewCollectionDescriptor,
     NavidromeGridViewCollectionType,
     OnlineGridViewCollectionDescriptor,
-} from '../../../library/core/contracts/collection';
+} from '../../../library/core/collection/collection.contract';
 import { buildLocalLibraryIndex, followEntityRedirect } from '../../../utils/localLibraryIndex';
 import { getLocalCoverAssetUrl } from '../../../services/localCoverAssetUrl';
+import type { FoliaPlaylist } from '../../../types/foliaPlaylist';
+import { getFoliaEntryLocalSongId } from '../../../utils/foliaPlaylistEntries';
 
 // src/components/app/home/gridViewCollectionAdapters.ts
 // Converts home-surface collections into small GridView descriptors and resolves non-Netease tracks outside GridView.
@@ -25,9 +27,9 @@ export type {
     NavidromeGridViewCollectionDescriptor,
     NavidromeGridViewCollectionType,
     OnlineGridViewCollectionDescriptor,
-} from '../../../library/core/contracts/collection';
-// 集合身份搬到了 library/core/model/collectionIdentity：store 与组件共用一份，在线集合带上 provider。
-export { collectionKey } from '../../../library/core/model/collectionIdentity';
+} from '../../../library/core/collection/collection.contract';
+// 集合身份搬到了 library/core/collection/collectionIdentity：store 与组件共用一份，在线集合带上 provider。
+export { collectionKey } from '../../../library/core/collection/collectionIdentity';
 
 const getDisplayName = (name: React.ReactNode) => (
     typeof name === 'string' || typeof name === 'number'
@@ -104,15 +106,15 @@ export const createNavidromeGridViewCollection = (
     editable: Boolean((item as { editable?: boolean }).editable),
 });
 
-// Resolves the ordered, deduplicated artist entity names represented by a local album's songs.
-export const resolveLocalAlbumArtistDisplay = (
+/** 本地专辑的专辑歌手：专辑里各首歌的歌手实体去重（跟随合并），按出现顺序；id 是歌手实体 id，可以直接打开歌手页。 */
+export const resolveLocalAlbumArtists = (
     songIds: string[],
     catalog: { entities: LocalLibraryEntity[]; assignments: LocalLibraryAssignment[]; },
-): string => {
+): { id: string; entityId: string; name: string }[] => {
     const index = buildLocalLibraryIndex(catalog.entities, catalog.assignments);
     const songIdSet = new Set(songIds);
     const seenArtistIds = new Set<string>();
-    const names: string[] = [];
+    const artists: { id: string; entityId: string; name: string }[] = [];
 
     catalog.assignments.forEach(assignment => {
         if (!songIdSet.has(assignment.songId)) return;
@@ -121,12 +123,18 @@ export const resolveLocalAlbumArtistDisplay = (
             const artistEntity = activeArtistId ? index.entitiesById.get(activeArtistId) : undefined;
             if (!artistEntity || artistEntity.kind !== 'artist' || seenArtistIds.has(artistEntity.id)) return;
             seenArtistIds.add(artistEntity.id);
-            names.push(artistEntity.displayName);
+            artists.push({ id: artistEntity.id, entityId: artistEntity.id, name: artistEntity.displayName });
         });
     });
 
-    return names.join(', ');
+    return artists;
 };
+
+// Resolves the ordered, deduplicated artist entity names represented by a local album's songs.
+export const resolveLocalAlbumArtistDisplay = (
+    songIds: string[],
+    catalog: { entities: LocalLibraryEntity[]; assignments: LocalLibraryAssignment[]; },
+): string => resolveLocalAlbumArtists(songIds, catalog).map(artist => artist.name).join(', ');
 
 export const refreshLocalGridViewCollection = (
     descriptor: LocalGridViewCollectionDescriptor,
@@ -151,10 +159,11 @@ export const refreshLocalGridViewCollection = (
             .map(assignment => assignment.songId);
         const songIdSet = new Set(songIds);
         const currentSongs = localSongs.filter(song => songIdSet.has(song.id));
-        const refreshedSongs = entity.kind === 'album' ? sortLocalFolderSongs(currentSongs) : currentSongs;
-        const albumArtist = entity.kind === 'album'
-            ? resolveLocalAlbumArtistDisplay(songIds, catalog)
-            : undefined;
+        // 专辑按碟号、曲号排，和首页专辑分组同一套规则；按文件名排会把各碟同号的曲目挤在一起。
+        const refreshedSongs = entity.kind === 'album' ? sortLocalAlbumSongs(currentSongs) : currentSongs;
+        // 专辑歌手带着实体 id（artists），专辑页头的歌手名可以点开歌手页；albumArtist 是拼好的一串名字。
+        const albumArtists = entity.kind === 'album' ? resolveLocalAlbumArtists(songIds, catalog) : [];
+        const albumArtist = albumArtists.map(artist => artist.name).join(', ');
         return {
             ...descriptor,
             id: entity.id,
@@ -162,7 +171,7 @@ export const refreshLocalGridViewCollection = (
             name: entity.displayName,
             songIds: refreshedSongs.map(song => song.id),
             trackCount: refreshedSongs.length,
-            ...(albumArtist ? { albumArtist, description: albumArtist } : {}),
+            ...(albumArtist ? { albumArtist, description: albumArtist, artists: albumArtists } : {}),
         };
     }
 
@@ -195,6 +204,36 @@ export const resolveLocalGridViewTracks = (
 
     // Row-sized covers: GridView renders these as list thumbnails, never full-bleed.
     return buildLocalQueue(orderedSongs, undefined, catalog, LIST_ROW_COVER_SIZE) as SongResult[];
+};
+
+// 换了来源的条目（转存时改由别的音源播放）把原来那首的 key 带在行上，界面据此画一个记号。只跟着这一行走：
+// 快照里要是留着别处带来的这个字段（这首歌是从另一张转存歌单里加过来的），而这一条自己没换过，就拿掉。
+const withFoliaOriginalKey = (song: SongResult, originalKey: string | undefined): SongResult => {
+    const carried = (song as UnifiedSong).foliaOriginalKey;
+    if (carried === originalKey) return song;
+    const { foliaOriginalKey: _carried, ...rest } = song as UnifiedSong;
+    return (originalKey ? { ...rest, foliaOriginalKey: originalKey } : rest) as SongResult;
+};
+
+/**
+ * Folia 聚合歌单的曲目，按歌单里的顺序：本地条目换成曲库里那首（和本地集合同一种行），别的来源的条目用歌单存着的快照
+ * （来源停用、卸载后照样显示）。曲库里没有的本地条目不出现（歌单下次读的时候会把它删掉）。
+ */
+export const resolveFoliaPlaylistTracks = (
+    playlist: Pick<FoliaPlaylist, 'entries'>,
+    localSongs: LocalSong[],
+    catalog?: { entities: LocalLibraryEntity[]; assignments: LocalLibraryAssignment[]; },
+): SongResult[] => {
+    const songsById = new Map(localSongs.map(song => [song.id, song]));
+    const localEntries = playlist.entries.flatMap(entry => songsById.get(getFoliaEntryLocalSongId(entry) ?? '') ?? []);
+    const localTracks = new Map(buildLocalQueue(localEntries, undefined, catalog, LIST_ROW_COVER_SIZE).flatMap(track => (
+        track.localRef?.songId ? [[track.localRef.songId, track as SongResult] as const] : []
+    )));
+    return playlist.entries.flatMap(entry => {
+        const localSongId = getFoliaEntryLocalSongId(entry);
+        if (localSongId === null) return [withFoliaOriginalKey(entry.song, entry.originalKey)];
+        return localTracks.get(localSongId) ?? [];
+    });
 };
 
 const getLocalGridViewCoverSource = (songs: LocalSong[]): string | undefined => {
@@ -231,7 +270,7 @@ export const resolveLocalGridViewCoverSource = (
     return getLocalGridViewCoverSource(orderedSongs);
 };
 
-// Navidrome 曲目的加载搬到了 library/core/services/navidromeCollectionTracks；资源直接使用它，这里只适配集合描述与本地数据。
+// Navidrome 曲目的加载搬到了 library/core/collection/resource/navidromeCollectionTracks.service；资源直接使用它，这里只适配集合描述与本地数据。
 
 export const isLocalGridViewCollection = (
     collection: GridViewCollectionDescriptor

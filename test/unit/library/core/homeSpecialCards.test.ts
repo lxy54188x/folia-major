@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { TFunction } from 'i18next';
-import type { LocalPlaylist, LocalSong } from '@/types';
+import type { LocalSong } from '@/types';
+import type { FoliaPlaylist } from '@/types/foliaPlaylist';
+import { summaryOfFoliaPlaylist } from '../../helpers/foliaPlaylistSummary';
 import type { ProviderCollection } from '@/types/onlineMusic';
-import { buildOnlinePlaylistCards, buildOnlineRadioCards } from '@/library/core/model/homeCards';
-import { buildLocalHomeCards, buildLocalHomeGroups } from '@/library/core/model/localHomeModel';
-import { buildNavidromeSectionCards, EMPTY_NAVIDROME_HOME_DATA } from '@/library/core/model/navidromeHomeModel';
-import { resolveLibraryHomeSpecial } from '@/library/core/model/homeSpecialCards';
+import { buildOnlinePlaylistCards, buildOnlineRadioCards } from '@/library/core/home/homeCards';
+import { buildLocalHomeCards, buildLocalHomeGroups } from '@/library/core/home/localHomeModel';
+import { buildFoliaHomeGroups } from '@/library/core/home/foliaHomeModel';
+import { buildNavidromeSectionCards, EMPTY_NAVIDROME_HOME_DATA } from '@/library/core/home/navidrome/navidromeHomeModel';
+import { resolveLibraryHomeSpecial } from '@/library/core/home/homeSpecialCards';
 
 // test/unit/library/core/homeSpecialCards.test.ts
 // 首页特殊集合的判定：只看身份字段（id、type、isVirtual、来源对象的 isLiked），不看显示名；来源不同时同样的字段含义不同。
@@ -43,16 +46,33 @@ describe('home special cards', () => {
         expect(resolveLibraryHomeSpecial({ id: 'al', type: 'album', raw: { isLiked: true } }, 'online')).toBeNull();
     });
 
+    it('online: an extra provider radio is its own kind, the Personal FM and plain scenes stay as they were', () => {
+        const radio = buildOnlineRadioCards({
+            dailyCoverUrl: '',
+            dailyCount: 3,
+            recommended: [
+                collection({ id: 'scene-1', type: 'radio', personalFm: { mode: 'SCENE_RCMD', scene: '1' } }),
+                collection({ id: 'station-1', type: 'radio', personalFm: { mode: 'DEFAULT', scene: null, station: 'radio' } }),
+            ],
+        }, { t });
+        expect(radio.map(card => resolveLibraryHomeSpecial(card, 'online'))).toEqual(['personal-fm', 'daily', 'personal-fm', 'fm-station']);
+        // Only the online source has radios; the same field means nothing for another one.
+        expect(resolveLibraryHomeSpecial(radio[3], 'local')).toBeNull();
+    });
+
     it('local: All Songs and the favourite playlist; the unknown album / artist buckets are not special', () => {
         const songs = [song('s1', 'F1'), song('s2', 'F2')];
-        const playlists: LocalPlaylist[] = [
-            { id: 'fav', name: 'Liked', songIds: ['s1'], isFavorite: true, createdAt: 1, updatedAt: 1 } as LocalPlaylist,
-            { id: 'mix', name: 'Mix', songIds: ['s2'], createdAt: 1, updatedAt: 1 } as LocalPlaylist,
+        const localEntries = (songIds: string[]) => songIds.map(id => ({ key: `local:${id}`, song: { id }, addedAt: 1 }));
+        const playlists: FoliaPlaylist[] = [
+            { id: 'fav', name: 'Liked', entries: localEntries(['s1']), isFavorite: true, createdAt: 1, updatedAt: 1 } as FoliaPlaylist,
+            { id: 'mix', name: 'Mix', entries: localEntries(['s2']), createdAt: 1, updatedAt: 1 } as FoliaPlaylist,
         ];
-        const groups = buildLocalHomeGroups(songs, playlists, t, { entities: [], assignments: [] }, () => null);
+        const groups = buildLocalHomeGroups(songs, t, { entities: [], assignments: [] }, () => null);
+        const foliaGroups = buildFoliaHomeGroups(playlists.map(summaryOfFoliaPlaylist), songs, t, () => null);
         const special = (list: typeof groups.folders) => buildLocalHomeCards(list).map(card => resolveLibraryHomeSpecial(card, 'local'));
         expect(special(groups.folders)).toEqual(['all-songs', null, null]);
-        expect(special(groups.playlists)).toEqual(['local-favorites', null]);
+        // 歌单在 Folia 组：卡片的形状没变，「我喜欢的音乐」仍按 isVirtual 认。
+        expect(special(foliaGroups)).toEqual(['local-favorites', null]);
         expect(special(groups.albums).every(kind => kind === null)).toBe(true);
         expect(special(groups.artists).every(kind => kind === null)).toBe(true);
     });

@@ -1,10 +1,10 @@
 import React, { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { LocalLibraryGroup, LocalPlaylist, LocalSong } from '../../../types';
-import type { LibraryAccountController } from '../../core/contracts/account';
-import type { LibraryCollectionDescriptor } from '../../core/contracts/collection';
-import type { LibraryDirectoryBatchController, LibraryHiddenScope } from '../../core/contracts/directory';
-import type { LibraryLocalCatalogSnapshot } from '../../core/contracts/home';
+import type { LocalLibraryGroup, LocalSong } from '../../../types';
+import type { LibraryAccountController } from '../../core/account/account.contract';
+import type { LibraryCollectionDescriptor } from '../../core/collection/collection.contract';
+import type { LibraryDirectoryBatchController, LibraryHiddenScope } from '../../core/directory/directory.contract';
+import type { LibraryLocalCatalogSnapshot } from '../../core/home/home.contract';
 import type {
     LibraryHomeActionsController,
     LibraryHomeListAction,
@@ -13,15 +13,15 @@ import type {
     LibraryHomeTabKey,
     LibraryLocalDirectoryTreesResource,
     LibraryNavidromeHomeResource,
-} from '../../core/contracts/homeModel';
-import type { LibraryDeclaredActions, LibraryHomeActionId } from '../../core/contracts/suite';
-import { resolveLocalHomeActions, type LocalHomeRow } from '../../core/model/localHomeModel';
-import { isNavidromeHomeSection, resolveNavidromeCollectionType } from '../../core/model/navidromeHomeModel';
-import type { LibraryHomeOnlineList } from '../../core/bindings/useLibraryHomeOnline';
-import { useLibraryHomeLocal, useLocalDirectoryTrees, useLocalHomeBatchConfig } from '../../core/bindings/useLibraryHomeLocal';
-import { useLibraryHomeNavidrome } from '../../core/bindings/useLibraryHomeNavidrome';
-import { useLibraryHomeActions } from '../../core/bindings/useLibraryHomeActions';
-import { useLibraryHomeListRegistration } from '../../core/bindings/useLibraryHomeSurfaceRegistration';
+} from '../../core/home/homeModel.contract';
+import type { LibraryDeclaredActions, LibraryHomeActionId } from '../../core/suite/suite.contract';
+import { resolveLocalHomeActions, type LocalHomeRow } from '../../core/home/localHomeModel';
+import { isNavidromeHomeSection, resolveNavidromeCollectionType } from '../../core/home/navidrome/navidromeHomeModel';
+import type { LibraryHomeOnlineList } from '../../core/home/online/useLibraryHomeOnline';
+import { useLibraryHomeLocal, useLocalDirectoryTrees, useLocalHomeBatchConfig } from '../../core/home/useLibraryHomeLocal';
+import { useLibraryHomeNavidrome } from '../../core/home/navidrome/useLibraryHomeNavidrome';
+import { useLibraryHomeActions } from '../../core/home/useLibraryHomeActions';
+import { useLibraryHomeListRegistration } from '../../core/home/useLibraryHomeSurfaceRegistration';
 import LibraryTuiDirectory from './LibraryTuiDirectory';
 import LibraryTuiAccountList from './LibraryTuiAccountList';
 import type { LibraryTuiPromptRequest } from './LibraryTuiPrompt';
@@ -158,7 +158,6 @@ export const LibraryTuiOnlineList: React.FC<LibraryTuiListCommonProps & {
 
 export const LibraryTuiLocalList: React.FC<LibraryTuiListCommonProps & {
     localSongs: LocalSong[];
-    localPlaylists: LocalPlaylist[];
     catalog: LibraryLocalCatalogSnapshot;
     activeRow: number;
     setActiveRow: (row: LocalHomeRow) => void;
@@ -166,7 +165,6 @@ export const LibraryTuiLocalList: React.FC<LibraryTuiListCommonProps & {
     directoryActions?: LibraryDirectoryBatchController;
 }> = ({
     localSongs,
-    localPlaylists,
     catalog,
     activeRow,
     setActiveRow,
@@ -181,7 +179,7 @@ export const LibraryTuiLocalList: React.FC<LibraryTuiListCommonProps & {
     const { t } = useTranslation();
     const playlistFileInputRef = useRef<HTMLInputElement>(null);
     const directoryTrees = useLocalDirectoryTrees(treesResource, localSongs);
-    const local = useLibraryHomeLocal({ localSongs, localPlaylists, catalog, activeRow });
+    const local = useLibraryHomeLocal({ localSongs, catalog, activeRow });
     const { snapshot: actionState, importBusy } = useLibraryHomeActions(homeActions);
     const batchConfig = useLocalHomeBatchConfig({
         controller: directoryActions,

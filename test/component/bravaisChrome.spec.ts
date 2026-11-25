@@ -44,14 +44,19 @@ const mountBravais = async (mount: (id: string) => Promise<unknown>, page: Page)
     await settled(page);
 };
 
-/** 一张此刻完整在视口中部、没被缝盖住的磁贴（slot key）。 */
+/**
+ * 一张此刻在视口中部、没被缝盖住的磁贴（slot key）。集合页整层倾斜着：磁贴与缝的外接框都是转过的（缝还带上下的出血），
+ * 所以按磁贴的中心点找——中心在视口中部、最上层就是它自己。
+ */
 const middleTile = (page: Page, attribute: 'data-library-card' | 'data-library-entry') => page.evaluate(name => {
-    const seamRect = document.querySelector('[data-bravais-seam]')?.getBoundingClientRect();
-    const fits = (rect: DOMRect) => rect.left > 200 && rect.top > 120
-        && rect.right < window.innerWidth - 200 && rect.bottom < window.innerHeight - 200
-        && (!seamRect || seamRect.width < 1 || rect.right < seamRect.left - 4 || rect.left > seamRect.right + 4);
-    const tile = [...document.querySelectorAll<HTMLElement>(`.bravais-tile[${name}]`)]
-        .find(element => fits(element.getBoundingClientRect()));
+    const tile = [...document.querySelectorAll<HTMLElement>(`.bravais-tile[${name}]`)].find((element) => {
+        const rect = element.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        if (x < 320 || y < 240 || x > window.innerWidth - 320 || y > window.innerHeight - 320) return false;
+        const hit = document.elementFromPoint(x, y);
+        return Boolean(hit && element.contains(hit));
+    });
     return tile?.dataset.bravaisSlot ?? null;
 }, attribute);
 
@@ -140,7 +145,9 @@ test.describe('[bravais-only] wall chrome and shared appearance settings', () =>
         await tools(page).click();
         const menu = panel(page);
         await expect(menu).toBeVisible();
-        await expect(menu.getByRole('menuitem', { name: 'Locate the playing song', exact: true })).toBeVisible();
+        // 定位不在面板里了：它是工具按钮上方单独的一颗（有可定位的页时才出现）。
+        await expect(quick(page, 'queue')).toBeVisible();
+        await expect(menu.getByRole('menuitem', { name: 'Locate the playing song', exact: true })).toHaveCount(0);
         await expect(menu.getByRole('menuitemcheckbox', { name: 'Poster lighting', exact: true })).toBeChecked();
         await expect(menu.getByRole('menuitemcheckbox', { name: 'Poster focus tint', exact: true })).toBeChecked();
 
@@ -219,7 +226,7 @@ test.describe('[bravais-only] wall chrome and shared appearance settings', () =>
             return child.textContent?.trim().split(/\s/)[0] ?? '';
         }));
         expect(order).toEqual([
-            'quick:locate-playing,shuffle-queue,generate-theme,queue,open-lattice,open-player',
+            'quick:shuffle-queue,generate-theme,queue,open-lattice,open-player,open-settings',
             'slider',
             'heading',
             'Wall',
@@ -228,16 +235,15 @@ test.describe('[bravais-only] wall chrome and shared appearance settings', () =>
         ]);
         await expect(menu.getByRole('separator', { name: 'Wall appearance', exact: true })).toBeAttached();
         // 快捷格是纯图标：可访问名是全名，格子里没有字，tooltip 带按键提示。
-        await expect(quick(page, 'locate-playing')).toHaveAccessibleName('Locate the playing song');
-        await expect(quick(page, 'locate-playing')).toHaveText('');
-        await expect(quick(page, 'locate-playing')).toHaveAttribute('title', /: \+ C/);
         await expect(quick(page, 'shuffle-queue')).toHaveAccessibleName('Shuffle the queue');
+        await expect(quick(page, 'shuffle-queue')).toHaveText('');
         await expect(quick(page, 'shuffle-queue')).toHaveAttribute('title', /: \+ R/);
         await expect(quick(page, 'generate-theme')).toHaveAccessibleName('Generate a theme for this song');
         await expect(quick(page, 'open-lattice')).toHaveAccessibleName('Go to Lattice');
         await expect(quick(page, 'open-lattice')).toHaveAttribute('title', /Ctrl \+ B/);
         await expect(quick(page, 'queue')).toHaveAccessibleName('Play queue');
         await expect(quick(page, 'open-player')).toHaveAccessibleName('Open the player');
+        await expect(quick(page, 'open-settings')).toHaveAccessibleName('Open settings');
 
         // 面板整个在屏内（不顶出顶部、不出右边）；窄屏同样放得下。
         const inside = async () => {
@@ -305,7 +311,8 @@ test.describe('[bravais-only] wall chrome and shared appearance settings', () =>
         await expect(panel(page)).toHaveCount(0);
     });
 
-    test('in Personal FM, Lattice and the queue cell are disabled with a reason', async ({ mount, page }) => {
+    // 私人 FM 下 Lattice 那一格照常能点（进去是电台墙）；没有可编辑的队列，队列格禁用并写原因。
+    test('in Personal FM the queue cell is disabled with a reason, and Lattice stays open to the radio wall', async ({ mount, page }) => {
         await mountBravais(mount, page);
         await page.evaluate(() => window.__homeProbe!.setLattice(true));
         await page.evaluate(async () => {
@@ -314,8 +321,8 @@ test.describe('[bravais-only] wall chrome and shared appearance settings', () =>
             usePlaybackStore.setState({ isFmMode: true });
         });
         await tools(page).click();
-        await expect(quick(page, 'open-lattice')).toBeDisabled();
-        await expect(quick(page, 'open-lattice')).toHaveAttribute('aria-description', 'Lattice does not support Personal FM mode');
+        await expect(quick(page, 'open-lattice')).toBeEnabled();
+        await expect(quick(page, 'open-lattice')).not.toHaveAttribute('aria-description', /.+/);
         await expect(quick(page, 'queue')).toBeDisabled();
         await expect(quick(page, 'queue')).toHaveAttribute('aria-description', 'Personal FM has no queue to edit');
     });
@@ -326,6 +333,14 @@ test.describe('[bravais-only] wall chrome and shared appearance settings', () =>
         await tools(page).click();
         await quick(page, 'open-player').click();
         await expect.poll(async () => (await calls(page, 'openPlayer')).length).toBe(1);
+        await expect(panel(page)).toHaveCount(0);
+    });
+
+    test('the last quick cell opens settings through the host and closes the panel', async ({ mount, page }) => {
+        await mountBravais(mount, page);
+        await tools(page).click();
+        await quick(page, 'open-settings').click();
+        await expect.poll(async () => (await calls(page, 'openSettings')).length).toBe(1);
         await expect(panel(page)).toHaveCount(0);
     });
 

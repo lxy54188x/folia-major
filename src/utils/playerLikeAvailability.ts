@@ -1,4 +1,5 @@
 import { getPlaybackSourceRef } from './appPlaybackGuards';
+import { likesGoToFolia } from './foliaHeart';
 import { omni } from '../services/onlineMusic/omni';
 import type { SongResult } from '../types';
 
@@ -31,7 +32,8 @@ export const resolveLikeAvailability = (
     }
 
     const sourceRef = getPlaybackSourceRef(currentSong);
-    if (sourceRef.kind === 'online' && !omni.canLikeSong(currentSong)) {
+    // 没有账号收藏能力的音源：红心进 Folia 的「我喜欢的音乐」，可用。
+    if (sourceRef.kind === 'online' && !likesGoToFolia(currentSong) && !omni.canLikeSong(currentSong)) {
         return {
             disabled: true,
             reason: {
@@ -43,3 +45,13 @@ export const resolveLikeAvailability = (
 
     return { disabled: false, reason: null };
 };
+
+/**
+ * 私人 FM 的「不喜欢」能不能用：只有 provider 真有 dislikeSong 才行。没有时（波点）垃圾桶置灰，
+ * 不再假装记下了「不喜欢」、实际只切到下一首。
+ */
+export const canDislikeCurrentSong = (currentSong: SongResult | null): boolean => (
+    Boolean(currentSong)
+    && getPlaybackSourceRef(currentSong as SongResult).kind === 'online'
+    && omni.canDislikeSong(currentSong as SongResult)
+);

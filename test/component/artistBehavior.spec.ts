@@ -586,13 +586,23 @@ for (const suite of SUITES) {
             await openArtist(page, 'artist-main');
             await waitForArtist(page, main.albumCount);
             const playable = topKeys(main, true);
-            await expect.poll(async () => (await artistSurface(page))?.availableActions).toEqual(['play-top-songs', 'enqueue-top-songs', 'reload']);
+            // 随机播放热门歌曲只有 grid / bravais 声明（TUI 已冻结）。
+            const shuffles = suite !== 'tui';
+            await expect.poll(async () => (await artistSurface(page))?.availableActions)
+                .toEqual(shuffles ? ['play-top-songs', 'shuffle-top-songs', 'enqueue-top-songs', 'reload'] : ['play-top-songs', 'enqueue-top-songs', 'reload']);
             expect(await artistSurface(page)).toMatchObject({ playableTopSongCount: playable.length, albumCount: main.albumCount, isFilterActive: false });
 
             await clearLog(page);
             expect(await runArtistSurface(page, 'play-top-songs')).toBe(true);
             await expect.poll(() => calls(page, 'playAll')).toHaveLength(1);
             expect((await lastCall(page, 'playAll'))?.ids).toEqual(playable);
+            expect((await lastCall(page, 'playAll'))?.shuffle).toBeUndefined();
+            if (shuffles) {
+                await clearLog(page);
+                expect(await runArtistSurface(page, 'shuffle-top-songs')).toBe(true);
+                await expect.poll(() => calls(page, 'playAll')).toHaveLength(1);
+                expect(await lastCall(page, 'playAll')).toMatchObject({ ids: playable, shuffle: true });
+            }
 
             await page.evaluate(keys => window.__libraryProbe!.seedQueue(keys), playable.slice(0, 3));
             await clearLog(page);
@@ -611,7 +621,9 @@ for (const suite of SUITES) {
             await mountProbe(mount, page, suite);
             await openArtist(page, 'local-artist');
             await waitForArtist(page, LOCAL_ALBUM_NAMES.length);
-            await expect.poll(async () => (await artistSurface(page))?.availableActions).toEqual(['play-top-songs', 'enqueue-top-songs', 'edit-entity']);
+            await expect.poll(async () => (await artistSurface(page))?.availableActions).toEqual(suite === 'tui'
+                ? ['play-top-songs', 'enqueue-top-songs', 'edit-entity']
+                : ['play-top-songs', 'shuffle-top-songs', 'enqueue-top-songs', 'edit-entity']);
             expect(await runArtistSurface(page, 'edit-entity')).toBe(true);
             await expect(page.getByRole('dialog')).toBeVisible();
         });
@@ -759,9 +771,10 @@ test.describe('[bravais-only] artist page wall', () => {
         await page.locator('[data-bravais-seam-action="list"]').dispatchEvent('click');
         const rows = page.locator('[data-bravais-list-row]');
         await expect(rows.first()).toHaveAttribute('data-bravais-list-row', `song:${topKeys(main)[0]}`);
-        const firstRows = await rows.evaluateAll(elements => elements.slice(0, 12).map(element => element.getAttribute('data-bravais-list-row')));
-        expect(firstRows.slice(0, 10)).toEqual(topKeys(main).map(key => `song:${key}`));
-        expect(firstRows.slice(10).every(key => key?.startsWith('album:'))).toBe(true);
+        // 虚拟列表的行是面板翻进来、量完高度之后才补齐的（从海报翻成面板时相机同时在让位）：等它补齐再读。
+        const firstRows = () => rows.evaluateAll(elements => elements.slice(0, 12).map(element => element.getAttribute('data-bravais-list-row')));
+        await expect.poll(async () => (await firstRows()).slice(0, 10)).toEqual(topKeys(main).map(key => `song:${key}`));
+        expect((await firstRows()).slice(10).every(key => key?.startsWith('album:'))).toBe(true);
         // 无限拼贴：Home 落在起点磁贴，它是第 1 首热门歌曲。
         await pressOnPage(page, 'Home');
         await expect(page.locator('.bravais-tile[data-bravais-focused]')).toHaveAttribute('data-library-entry', `song:${topKeys(main)[0]}`);
@@ -973,31 +986,30 @@ test.describe('[bravais-only] artist page wall', () => {
         await mountProbe(mount, page, 'bravais');
         await openArtist(page, 'artist-main');
         await waitForArtist(page, main.albumCount);
+        // 完整等级的歌手页是海报（BravaisSeamPoster）：名字是缝的标题，定妆照垫底，简介与统计是「关于艺术家」。
+        await expect(stageRoot(page).locator('[data-bravais-seam="poster"] [data-bravais-poster]')).toHaveCount(1);
         await expect(stageRoot(page).locator('[data-bravais-seam-title]')).toHaveText(main.name);
         await expect(stageRoot(page).locator('[data-bravais-artist-bio]')).toHaveText(main.description);
-        await expect(stageRoot(page).locator('[data-bravais-seam-artist] img')).toHaveAttribute('alt', main.name);
-        await expect(stageRoot(page).locator('[data-bravais-artist-name]')).toHaveText(main.name);
+        await expect(stageRoot(page).locator('[data-bravais-poster-portrait] img')).toHaveCount(1);
         // 统计只有一行（详情的歌曲数 · 专辑数），是「关于艺术家」的附注；元数据行不再重复它，也没有「N 首热门」。
         const stats = `${main.topSongIndexes.length} songs · ${main.albumCount} albums`;
         await expect(stageRoot(page).locator('[data-bravais-artist-stats]')).toHaveText(stats);
-        await expect(stageRoot(page).locator('.bravais-seam-full .bravais-seam-meta')).toHaveCount(0);
-        await expect(stageRoot(page).locator('.bravais-seam-full')).not.toContainText('top songs ·');
-        // 在线歌手没有实体可编辑：「⋯ 更多」里只有重新拉取。
-        await stageRoot(page).locator('[data-bravais-seam-action="more"]').dispatchEvent('click');
-        await expect(stageRoot(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="reload"]')).toBeVisible();
-        await expect(stageRoot(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="edit-entity"]')).toHaveCount(0);
+        await expect(stageRoot(page).locator('[data-bravais-poster] .bravais-poster-meta')).toHaveCount(0);
+        await expect(stageRoot(page).locator('[data-bravais-poster]')).not.toContainText('top songs ·');
+        // 在线歌手没有实体可编辑：只有重新拉取（方案 C：海报的动作格放得下，它直接成一格，不在「⋯ 更多」里）。
+        const quick = stageRoot(page).locator('.bravais-seam-actions.is-quick');
+        await expect(quick.locator('[data-bravais-seam-action="reload"]')).toBeVisible();
+        await expect(stageRoot(page).locator('[data-bravais-seam-action="edit-entity"]')).toHaveCount(0);
         await back(page);
         await expect(artistLayer(page)).toHaveCount(0);
 
         await openArtist(page, 'local-artist');
         await waitForArtist(page, LOCAL_ALBUM_NAMES.length);
         await expect(stageRoot(page).locator('[data-bravais-seam-title]')).toHaveText(LOCAL_ARTIST_NAME);
-        // 「⋯ 更多」的展开状态留在缝里：已经开着就不再点（点一下会收起）。
-        const more = stageRoot(page).locator('[data-bravais-seam-action="more"]');
-        if (await more.getAttribute('aria-expanded') !== 'true') await more.dispatchEvent('click');
-        await expect(stageRoot(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="edit-entity"]')).toBeVisible();
-        await expect(stageRoot(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="reload"]')).toHaveCount(0);
-        await stageRoot(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="edit-entity"]').dispatchEvent('click');
+        // 本地歌手：实体信息直接成一格，没有重新拉取。
+        await expect(quick.locator('[data-bravais-seam-action="edit-entity"]')).toBeVisible();
+        await expect(stageRoot(page).locator('[data-bravais-seam-action="reload"]')).toHaveCount(0);
+        await quick.locator('[data-bravais-seam-action="edit-entity"]').dispatchEvent('click');
         await expect(page.getByRole('dialog')).toBeVisible();
     });
 });

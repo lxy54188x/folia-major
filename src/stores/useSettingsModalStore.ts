@@ -8,17 +8,17 @@ import { create } from 'zustand';
 import i18n from '../i18n/config';
 
 
-import { normalizePinnedCommandIds, readPinnedCommandIds, writePinnedCommandIds, type PinnedCommandIds } from '../components/command-palette/pinnedCommandPreferences';
+import { normalizePinnedCommandIds, readPinnedCommandIds, writePinnedCommandIds, type PinnedCommandIds } from './pinnedCommandPreferences';
 import { applyAppLanguagePreference, readStoredAppLanguagePreference, type AppLanguagePreference } from '../i18n/config';
 import { setStatusMessage } from './useStatusMessageStore';
-import type { SettingsAnchorId } from '../components/modal/settings/navigation/settingsAnchorModel';
+import type { SettingsAnchorId } from '../utils/settingsAnchorModel';
 
 export type SettingsModalInitialTab = 'help' | 'options';
 
-export type SettingsSubviewId = 'appearance' | 'general' | 'playback' | 'interaction' | 'integration' | 'storage' | 'desktop' | 'graphics' | 'mods' | 'lab' | 'visualizer' | 'themePark' | 'lyricFilter' | 'globalLyricOffset';
+export type SettingsSubviewId = 'appearance' | 'player' | 'home' | 'playback' | 'lyrics' | 'sources' | 'general' | 'interaction' | 'integration' | 'ai' | 'storage' | 'desktop' | 'remote' | 'graphics' | 'mods' | 'visualizer' | 'themePark' | 'scene' | 'modsWindow' | 'lyricFilter' | 'globalLyricOffset';
 
-/** 歌词动画调参台的四页。列成数组是为了让「思索」的设置直达在单测里能核对 section 真实存在。 */
-export const VISUALIZER_SETTINGS_SECTIONS = ['common', 'background', 'visualizer', 'subtitle'] as const;
+/** 歌词动画调参台的五页。列成数组是为了让「思索」的设置直达在单测里能核对 section 真实存在。 */
+export const VISUALIZER_SETTINGS_SECTIONS = ['common', 'background', 'visualizer', 'subtitle', 'global'] as const;
 export type VisualizerSettingsSection = typeof VISUALIZER_SETTINGS_SECTIONS[number];
 
 export type SettingsModalState = {
@@ -30,8 +30,17 @@ export type SettingsModalState = {
      * A section inside the subview to land on, rather than its top. The sidebar table of contents
      * already knows how to scroll to one; this is the same destination, reachable from outside.
      * Carries a seq so that asking for the same anchor twice still scrolls the second time.
+     * `rowId` names one row inside the section (its `data-settings-row`) to land on and outline;
+     * while that row is not on the page the landing falls back to the section.
      */
-    initialAnchor?: { id: SettingsAnchorId; seq: number } | null;
+    initialAnchor?: { id: SettingsAnchorId; rowId?: string; seq: number } | null;
+    /**
+     * Counts openSettings calls. The dialog applies a request (tab, subview, the work window it names or
+     * the page under it) whenever this changes, so asking again for the subview already set still acts:
+     * the mods window's 「去音源设置」 while the request was already `sources`, or `modsWindow` again after
+     * the window was closed with its back button.
+     */
+    requestSeq?: number;
 };
 
 // Separate from the retired guide key so people who saw the old carousel still receive the Ponder lesson.
@@ -52,6 +61,7 @@ export type SettingsModalUiState = {
         initialSubview?: SettingsSubviewId | null,
         initialVisualizerSection?: VisualizerSettingsSection | null,
         initialAnchorId?: SettingsAnchorId | null,
+        initialRowId?: string | null,
     ) => void;
     closeSettings: () => void;
     handleSetAppLanguagePreference: (preference: AppLanguagePreference) => Promise<void>;
@@ -79,15 +89,20 @@ export const useSettingsModalStore = create<SettingsModalUiState>((set, get) => 
     },
     setIsUserGuideModalOpen: (isOpen) => set({ isUserGuideModalOpen: isOpen }),
     setIsSubSettingsViewOpen: (open) => set({ isSubSettingsViewOpen: open }),
-    openSettings: (initialTab = 'help', initialSubview = null, initialVisualizerSection = null, initialAnchorId = null) => set({
+    openSettings: (initialTab = 'help', initialSubview = null, initialVisualizerSection = null, initialAnchorId = null, initialRowId = null) => set({
         settingsModalState: {
             isOpen: true,
             initialTab,
             initialSubview,
             initialVisualizerSection,
             initialAnchor: initialAnchorId
-                ? { id: initialAnchorId, seq: (get().settingsModalState.initialAnchor?.seq ?? 0) + 1 }
+                ? {
+                    id: initialAnchorId,
+                    ...(initialRowId ? { rowId: initialRowId } : {}),
+                    seq: (get().settingsModalState.initialAnchor?.seq ?? 0) + 1,
+                }
                 : null,
+            requestSeq: (get().settingsModalState.requestSeq ?? 0) + 1,
         },
     }),
     closeSettings: () => set(state => ({
@@ -102,7 +117,9 @@ export const useSettingsModalStore = create<SettingsModalUiState>((set, get) => 
         const getLanguageLabel = (pref: AppLanguagePreference): string => {
             switch (pref) {
                 case 'zh-CN': return i18n.t('options.appLanguageZhCN', { lng: 'zh-CN' });
+                case 'zh-TW': return i18n.t('options.appLanguageZhTW', { lng: 'zh-TW' });
                 case 'in': return i18n.t('options.appLanguageInID', { lng: 'in' });
+                case 'vi': return i18n.t('options.appLanguageViVN', { lng: 'vi' });
                 case 'en': return i18n.t('options.appLanguageEnUS', { lng: 'en' });
                 default: return '';
             }
@@ -156,5 +173,6 @@ export const openSettings = (
     initialSubview?: SettingsSubviewId | null,
     initialVisualizerSection?: VisualizerSettingsSection | null,
     initialAnchorId?: SettingsAnchorId | null,
-) => useSettingsModalStore.getState().openSettings(initialTab, initialSubview, initialVisualizerSection, initialAnchorId);
+    initialRowId?: string | null,
+) => useSettingsModalStore.getState().openSettings(initialTab, initialSubview, initialVisualizerSection, initialAnchorId, initialRowId);
 export const closeSettings = () => useSettingsModalStore.getState().closeSettings();

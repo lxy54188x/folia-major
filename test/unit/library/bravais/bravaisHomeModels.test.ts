@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { LibraryDirectoryNode } from '@/library/core/contracts/directory';
-import type { LibraryHomeCard } from '@/library/core/contracts/homeModel';
+import type { LibraryDirectoryNode } from '@/library/core/directory/directory.contract';
+import type { LibraryHomeCard, LibraryHomeGroupView } from '@/library/core/home/homeModel.contract';
 import { getWallSlot } from '@/components/wall/wallSlots';
 import {
     createHomeItemCache,
+    cycleHomeSeamTab,
     cycleHomeTab,
     projectDirectoryRows,
+    projectHomeSeamGroups,
     projectHomeShortcuts,
     projectHomeWallItems,
     resolveHomeWallMode,
@@ -52,6 +54,22 @@ describe('resolveHomeWallMode', () => {
         expect(resolveHomeWallMode({ section: 'playlist', visibilityMode: 'manage-hidden-only', batch: false, query: 'jazz' }))
             .toEqual({ mode: 'finite', filterKey: 'playlist|hidden-only|jazz' });
         expect(resolveHomeWallMode({ section: 'playlist', visibilityMode: 'browse', batch: false, query: '   ' }))
+            .toEqual({ mode: 'infinite', filterKey: 'playlist' });
+    });
+
+    it('gives browse and manage a finite collage too while the home wall is finite only', () => {
+        expect(resolveHomeWallMode({ section: 'playlist', visibilityMode: 'browse', batch: false, query: '', finiteOnly: true }))
+            .toEqual({ mode: 'finite', filterKey: 'playlist' });
+        expect(resolveHomeWallMode({ section: 'playlist', visibilityMode: 'manage', batch: false, query: '', finiteOnly: true }))
+            .toEqual({ mode: 'finite', filterKey: 'playlist|manage' });
+        // 过滤、批量、只看隐藏照旧（本来就是有限拼贴，过滤身份不变）。
+        expect(resolveHomeWallMode({ section: 'playlist', visibilityMode: 'browse', batch: false, query: 'jazz', finiteOnly: true }))
+            .toEqual({ mode: 'finite', filterKey: 'playlist|browse|filter|jazz' });
+        expect(resolveHomeWallMode({ section: 'folders', visibilityMode: 'browse', batch: true, query: '', finiteOnly: true }))
+            .toEqual({ mode: 'finite', filterKey: 'folders|batch|' });
+        expect(resolveHomeWallMode({ section: 'playlist', visibilityMode: 'manage-hidden-only', batch: false, query: '', finiteOnly: true }))
+            .toEqual({ mode: 'finite', filterKey: 'playlist|hidden-only' });
+        expect(resolveHomeWallMode({ section: 'playlist', visibilityMode: 'browse', batch: false, query: '', finiteOnly: false }))
             .toEqual({ mode: 'infinite', filterKey: 'playlist' });
     });
 
@@ -150,6 +168,20 @@ describe('projectHomeShortcuts', () => {
             ['daily', 'Daily', 'card:daily_recommendations:daily_recommendations', false],
         ]);
         expect(projectHomeShortcuts([card('rec', 'playlist'), card('al', 'album')], { source: 'online', hiddenIds: new Set(), isDirect })).toEqual([]);
+    });
+
+    it('puts an extra provider radio next to the Personal FM, once, and leaves other scene cards out', () => {
+        const cards = [
+            card('personal_fm', 'radio', { name: 'FM' }),
+            card('scene-1', 'radio', { raw: { personalFm: { mode: 'SCENE_RCMD', scene: '1' } } }),
+            card('station-1', 'radio', { name: 'Radio One', raw: { personalFm: { mode: 'DEFAULT', scene: null, station: 'radio' } } }),
+            card('station-2', 'radio', { raw: { personalFm: { mode: 'DEFAULT', scene: null, station: 'radio2' } } }),
+        ];
+        const shortcuts = projectHomeShortcuts(cards, { source: 'online', hiddenIds: new Set(), isDirect });
+        expect(shortcuts.map(entry => [entry.special, entry.label, entry.itemKey])).toEqual([
+            ['personal-fm', 'FM', 'card:radio:personal_fm'],
+            ['fm-station', 'Radio One', 'card:radio:station-1'],
+        ]);
     });
 
     it('leaves out hidden ones and reads the identity per source', () => {
@@ -251,6 +283,54 @@ describe('select-all and tabs', () => {
         const tabs = [{ key: 'radio' }, { key: 'albums' }, { key: 'local' }] as const;
         expect(cycleHomeTab(tabs, 'playlist', -1)).toBe('local');
         expect(cycleHomeTab(tabs, 'playlist', 1)).toBe('radio');
+    });
+
+    // 宿主交来的扩展页签（模组的首页页面）：排在原生页签后面，选中态以宿主为准，F6 也把它们排进来（与网格的 Tab 一致）。
+    const nativeTabs = [
+        { key: 'playlist', label: 'Playlists' },
+        { key: 'radio', label: 'Radio', disabledReason: 'no' },
+        { key: 'local', label: 'Local' },
+    ] as const;
+    const extra = (id: string, active = false) => ({ id, label: id.toUpperCase(), active });
+
+    // 缝里的一级页签是首页两级页签的组；在线组和别的组一样只是一个页签（名字是当前音源的名字）。
+    const nativeGroups: LibraryHomeGroupView[] = [
+        { key: 'folia', label: 'Folia', active: false, tabs: [], target: 'folia' },
+        { key: 'online', label: 'Source A', active: false, tabs: [], target: 'radio' },
+        { key: 'local', label: 'Local', active: true, tabs: [], target: 'local' },
+        { key: 'navidrome', label: 'Navidrome', active: false, tabs: [], target: null, disabledReason: 'off' },
+    ];
+
+    it('projects groups as the first-level tabs, contributed pages after them, and lets an open page take the selection', () => {
+        expect(projectHomeSeamGroups(nativeGroups)).toEqual([
+            { key: 'folia', label: 'Folia', active: false, disabled: false },
+            { key: 'online', label: 'Source A', active: false, disabled: false },
+            { key: 'local', label: 'Local', active: true, disabled: false },
+            { key: 'navidrome', label: 'Navidrome', active: false, disabled: true, title: 'off' },
+        ]);
+        const closed = projectHomeSeamGroups(nativeGroups, [extra('mod:a'), extra('mod:b')]);
+        expect(closed.filter(tab => tab.active).map(tab => tab.key)).toEqual(['local']);
+        expect(closed.slice(4)).toEqual([
+            { key: 'mod:a', label: 'MOD:A', active: false, disabled: false },
+            { key: 'mod:b', label: 'MOD:B', active: false, disabled: false },
+        ]);
+        const open = projectHomeSeamGroups(nativeGroups, [extra('mod:a'), extra('mod:b', true)]);
+        expect(open.filter(tab => tab.active).map(tab => tab.key)).toEqual(['mod:b']);
+    });
+
+    it('cycles F6 through native tabs and contributed pages, starting from the open page', () => {
+        const extras = [extra('mod:a'), extra('mod:b')];
+        expect(cycleHomeSeamTab(nativeTabs, 'local', extras, 1)).toBe('mod:a');
+        expect(cycleHomeSeamTab(nativeTabs, 'playlist', extras, -1)).toBe('mod:b');
+        expect(cycleHomeSeamTab(nativeTabs, 'playlist', extras, 1)).toBe('local');
+        // 页面开着时从它算起，而不是从底下的原生页签。
+        const open = [extra('mod:a', true), extra('mod:b')];
+        expect(cycleHomeSeamTab(nativeTabs, 'playlist', open, 1)).toBe('mod:b');
+        expect(cycleHomeSeamTab(nativeTabs, 'playlist', open, -1)).toBe('local');
+        expect(cycleHomeSeamTab(nativeTabs, 'playlist', [extra('mod:a', false), extra('mod:b', true)], 1)).toBe('playlist');
+        // 没有扩展页签时与 cycleHomeTab 相同。
+        expect(cycleHomeSeamTab(nativeTabs, 'local', [], 1)).toBe('playlist');
+        expect(cycleHomeSeamTab([{ key: 'playlist' }], 'playlist', [], 1)).toBeNull();
     });
 });
 

@@ -1,4 +1,4 @@
-import { ArrowDownUp, CalendarClock, FolderSync, ListOrdered, PanelLeft, PanelRight, Pencil, RefreshCw, Share, SquarePen, Star, Tags, Type } from 'lucide-react';
+import { ArrowDownUp, CalendarClock, FolderSync, ImagePlus, ListOrdered, ListPlus, NotebookPen, PanelLeft, PanelRight, Pencil, RefreshCw, Share, Shuffle, SquarePen, Star, Tags, Type } from 'lucide-react';
 import { createGridSurfaceCommand } from '../commandFactories';
 import type { CommandPaletteCommand } from '../types';
 
@@ -88,12 +88,38 @@ export const gridCommands: CommandPaletteCommand[] = [
         Tags,
     ),
     createGridSurfaceCommand(
+        'grid-reorder-playlist',
+        'Reorder playlist songs',
+        'Edit the order of songs in this Folia playlist',
+        ['reorder', 'sort songs', 'A-Z', '歌单排序', '调整顺序'],
+        'reorder-playlist',
+        ListOrdered,
+    ),
+    createGridSurfaceCommand(
         'grid-export-playlist',
         'Export this playlist',
-        'Save this local playlist as an m3u8 file',
-        ['m3u8', 'export', '导出'],
+        'Save this Folia playlist as a JSON or M3U8 file',
+        ['m3u8', 'json', 'export', '导出'],
         'export-playlist',
         Share,
+    ),
+    // Folia 聚合歌单的转存：打开的是平台歌单 / 专辑时有「存成 Folia 歌单」，打开的是转存来的 Folia 歌单时有「从原歌单更新」。
+    // 两个都只打开对话框（名字、「改由……播放」的选择在那里）。
+    createGridSurfaceCommand(
+        'grid-save-to-folia',
+        'Save as a Folia playlist',
+        'Save this platform playlist or album as a Folia playlist, optionally played through another source',
+        ['folia', 'save playlist', 'copy playlist', 'transfer', '转存', '存成歌单', '聚合歌单'],
+        'save-to-folia',
+        ListPlus,
+    ),
+    createGridSurfaceCommand(
+        'grid-refresh-from-origin',
+        'Update from the original playlist',
+        'Read the original playlist again and add its new songs to this Folia playlist',
+        ['folia', 'update playlist', 'refresh', 'sync', '从原歌单更新', '同步歌单', '刷新歌单'],
+        'refresh-from-origin',
+        RefreshCw,
     ),
     createGridSurfaceCommand(
         'grid-edit-entity',
@@ -102,6 +128,14 @@ export const gridCommands: CommandPaletteCommand[] = [
         ['rename album', 'merge artist', '实体编辑'],
         'edit-entity',
         SquarePen,
+    ),
+    createGridSurfaceCommand(
+        'grid-set-cover',
+        'Set collection cover',
+        'Choose a fixed cover for this local folder, album or playlist',
+        ['cover', 'poster', 'artwork', '封面', '设置封面'],
+        'set-cover',
+        ImagePlus,
     ),
     createGridSurfaceCommand(
         'grid-toggle-edit-mode',
@@ -127,5 +161,23 @@ export const gridCommands: CommandPaletteCommand[] = [
         ['subscribe', 'unsubscribe', 'favorite', 'save album', '收藏', '取消收藏', '订阅'],
         'toggle-subscribe',
         Star,
+    ),
+    // 速记簿（core 的 collect-scope）：网格与 Bravais 的集合页都发布它，范围与「播放全部 / 入队」相同。
+    createGridSurfaceCommand(
+        'grid-collect-filtered',
+        'Add these songs to the scratchpad',
+        'Put this collection (only the filtered songs while filtering) in the scratchpad without touching the queue',
+        ['scratchpad', 'later', 'collect', 'save for later', '速记簿', '稍后再听', '暂存', '收集'],
+        'collect-filtered',
+        NotebookPen,
+    ),
+    // 随机播放（core 的 shuffle-scope）：与网格信息面板、Bravais 缝里「播放全部」右边那一格同一个动作。
+    createGridSurfaceCommand(
+        'grid-shuffle-play-filtered',
+        'Shuffle play these songs',
+        'Make this collection (only the filtered songs while filtering) the play queue in shuffled order and start from a random song',
+        ['shuffle', 'shuffle play', 'random', '随机播放', '乱序播放', '打乱播放'],
+        'shuffle-play-filtered',
+        Shuffle,
     ),
 ];

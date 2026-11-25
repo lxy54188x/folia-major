@@ -1,5 +1,5 @@
-import type { SongResult } from '../../../types';
-import type { LibraryHomeCard } from '../../core/contracts/homeModel';
+import type { SongResult, UnifiedSong } from '../../../types';
+import type { LibraryHomeCard } from '../../core/home/homeModel.contract';
 import type { BravaisItem, BravaisItemKind } from './bravaisLayer';
 import { formatCollectionBadge, resolveBravaisTileForm, resolveCollectionTrackCount } from './bravaisTileForm';
 
@@ -16,6 +16,7 @@ export const homeCardKind = (type: string | undefined): BravaisItemKind => {
         case 'album': return 'album';
         case 'artist': return 'artist';
         case 'folder': return 'folder';
+        case 'tag': return 'tag';
         case 'radio':
         case 'daily_recommendations': return 'feed';
         default: return 'playlist';
@@ -66,6 +67,10 @@ export type TrackDescription = {
     durationMs: number;
     playbackKey: string;
     unavailable: boolean;
+    /** 副标题后面接的一句（混合来源的歌单里这首来自哪里、来源不在时的原因）；没有就不接。 */
+    note?: string;
+    /** 副标题的悬停说明（换过来源的行：原来是哪个来源的歌）；没有就不给。 */
+    hint?: string;
 };
 
 export const formatDuration = (durationMs: number) => {
@@ -83,31 +88,37 @@ export const formatEntryBadge = (index: number, total: number) => (
 
 /**
  * 集合的曲目 → 条目。key 是 core 的条目键（entryKeyAt，重复的歌带序号），与浏览会话的 focusedEntryKey 同一套；
- * 拿不到条目键的（理论上不会）跳过。
+ * 拿不到条目键的（理论上不会）跳过。听歌排行里的歌带着平台给的播放次数（listenCount），副标题后面接上 listenCountLabel 给的那句。
  */
 export const projectCollectionTracks = (
     tracks: readonly SongResult[],
     entryKeyAt: (index: number) => string | null,
     describeTrack: (track: SongResult) => TrackDescription,
     unknownArtist: string,
+    listenCountLabel?: (count: number) => string,
 ): BravaisItem[] => {
     const items: BravaisItem[] = [];
     tracks.forEach((track, index) => {
         const key = entryKeyAt(index);
         if (!key) return;
         const description = describeTrack(track);
+        const listenCount = (track as UnifiedSong).listenCount;
+        const named = description.artists.join(', ') || description.album || unknownArtist;
+        const who = description.note ? `${named} · ${description.note}` : named;
         items.push({
             key,
             kind: 'track',
             title: track.name,
-            subtitle: description.artists.join(', ') || description.album || unknownArtist,
+            subtitle: typeof listenCount === 'number' && listenCountLabel ? `${who} · ${listenCountLabel(listenCount)}` : who,
             coverUrl: description.coverUrl,
             badge: formatEntryBadge(index, tracks.length),
+            badgeIsIndex: true,
             playbackKey: description.playbackKey,
             album: description.album || undefined,
             artists: description.artists,
             durationLabel: formatDuration(description.durationMs),
             unavailable: description.unavailable || undefined,
+            ...(description.hint ? { subtitleHint: description.hint } : {}),
         });
     });
     return items;

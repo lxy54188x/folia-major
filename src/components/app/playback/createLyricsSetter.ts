@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction, MutableRefObject } from 'react';
-import type { LyricData, SongResult } from '../../../types';
-import { applyLyricDisplayFilter } from '../../../utils/lyrics/filtering';
+import type { LyricChorusOrigin, LyricData, SongResult } from '../../../types';
+import { applyLyricLineRules, compileLyricLineRules, lyricsBeforeRules, rememberLyricsBeforeRules, type LyricLineRule } from '../../../utils/lyrics/lyricLineRules';
 import { isPureMusicLyricLines } from '../../../utils/lyrics/pureMusic';
 import { applyLyricStaffPolicy } from '../../../utils/lyrics/staffCreditsPolicy';
 import type { LyricStaffPolicyOptions } from '../../../utils/lyrics/staffCreditsPolicy';
@@ -8,10 +8,11 @@ import { ensureLyricDataRenderHints } from '../../../utils/lyrics/renderHints';
 import { applyLyricWordSegmentation } from '../../../utils/lyrics/lyricSegmentationRecord';
 import { applyAutoWordSegmentation } from '../../../utils/lyrics/icuFolia';
 import { getLyricSegmentationRecord } from '../../../stores/useLyricSegmentationStore';
-import { applyDetectedChorusEffects, applyNeteaseChorusByTime } from '../../../utils/lyrics/chorusEffects';
-import type { NeteaseChorusRange } from '../../../utils/lyrics/chorusEffects';
+import { applyDetectedChorusEffects, applyChorusRangesByTime } from '../../../utils/lyrics/chorusEffects';
+import type { ChorusRange } from '../../../utils/lyrics/chorusEffects';
 import { getPlaybackSongKey } from '../../../utils/appPlaybackGuards';
-import { applyLyricsTransform, untransformedLyrics } from '../../../services/hostExtensionHooks';
+import { applyLyricsTransform, lyricsForNoLyrics, untransformedLyrics } from '../../../services/hostExtensionHooks';
+import { setLyricsState as setPlaybackLyrics, usePlaybackStore } from '../../../stores/usePlaybackStore';
 
 // src/components/app/playback/createLyricsSetter.ts
 
@@ -36,28 +37,46 @@ const getStoredNeteaseLyrics = (song: SongResult | null): LyricData | null => {
     return null;
 };
 
+type CachedChorus = { ranges: ChorusRange[]; origin: LyricChorusOrigin };
+
+// The chorus lines of `lyrics` as time ranges, remembering whether the lyric data marked them; lines
+// marked before the origin was recorded count as guessed, so they never pass for a source's ranges.
+const readChorusLines = (lyrics: LyricData): CachedChorus => {
+    // The source's own ranges when the lyrics kept them: they start where the chorus does, the lines may not.
+    if (lyrics.sourceChorusRanges?.length && lyrics.lines.some(line => line.chorusOrigin === 'source')) {
+        return { ranges: lyrics.sourceChorusRanges, origin: 'source' };
+    }
+    const lines = lyrics.lines.filter(line => line.isChorus);
+    return {
+        ranges: lines.map(line => ({ startTime: line.startTime, endTime: line.endTime })),
+        origin: lines.some(line => line.chorusOrigin === 'source') ? 'source' : 'text',
+    };
+};
+
 // Creates the App-level lyric setter that applies filtering and render-hint normalization.
 // The staff-credit policy stays here rather than in the parser: it is a display decision that
 // depends on the finished timeline, and the parse/cache layer must not bake it in.
 export const createLyricsSetter = (
     setLyricsState: Dispatch<SetStateAction<LyricData | null>>,
-    lyricFilterPattern: string,
+    lyricLineRules: readonly LyricLineRule[],
     currentSongFullRef?: MutableRefObject<SongResult | null>,
     staffOptions?: LyricStaffPolicyOptions,
 ) => {
     let lastSongId: number | string | null = null;
-    let cachedNeteaseChorusRanges: NeteaseChorusRange[] | null = null;
+    let cachedNeteaseChorus: CachedChorus | null = null;
+    const compiledLineRules = compileLyricLineRules(lyricLineRules);
 
     return (incomingLyrics: LyricData | null) => {
-        // Lyrics already on screen (e.g. re-applied after an automix cancel) re-enter from
-        // their pre-transform source, so the extension transform below never stacks.
-        const nextLyrics = untransformedLyrics(incomingLyrics);
+        // Lyrics already on screen (e.g. re-applied after an automix cancel) re-enter from their
+        // pre-transform source, so the extension transform below never stacks, and from the lines
+        // they had before the line rules, so the rules in force now run on them exactly once.
+        const nextLyrics = lyricsBeforeRules(untransformedLyrics(incomingLyrics));
         const currentSong = currentSongFullRef?.current ?? null;
         const currentSongId = currentSong ? getPlaybackSongKey(currentSong) : null;
 
         if (currentSongId !== lastSongId) {
             lastSongId = currentSongId;
-            cachedNeteaseChorusRanges = null;
+            cachedNeteaseChorus = null;
         }
 
         // 通用过滤是用户的显式指令，先跑；staff 策略只处理它没删掉的开头块。
@@ -65,33 +84,24 @@ export const createLyricsSetter = (
         // 让 visualizer 走纯音乐路径，而不是把提示语当歌词渲染。provider 没覆盖到的来源（本地、QQ 等）靠这里兜底。
         let processed = nextLyrics && isPureMusicLyricLines(nextLyrics.lines)
             ? null
-            : applyLyricStaffPolicy(applyLyricDisplayFilter(nextLyrics, lyricFilterPattern), staffOptions);
+            : applyLyricStaffPolicy(applyLyricLineRules(nextLyrics, compiledLineRules), staffOptions);
         if (processed) {
             const hasChorus = processed.lines.some(line => line.isChorus);
             if (hasChorus) {
                 // Cache the chorus ranges from the incoming lyrics (e.g. NetEase lyrics)
-                cachedNeteaseChorusRanges = processed.lines
-                    .filter(line => line.isChorus)
-                    .map(line => ({
-                        startTime: line.startTime,
-                        endTime: line.endTime
-                    }));
+                cachedNeteaseChorus = readChorusLines(processed);
             } else {
                 // Try to load NetEase chorus ranges if they are not already cached
-                if (!cachedNeteaseChorusRanges && currentSong) {
+                if (!cachedNeteaseChorus && currentSong) {
                     const storedLyrics = getStoredNeteaseLyrics(currentSong);
                     if (storedLyrics) {
-                        cachedNeteaseChorusRanges = storedLyrics.lines
-                            .filter(line => line.isChorus)
-                            .map(line => ({
-                                startTime: line.startTime,
-                                endTime: line.endTime
-                            }));
+                        cachedNeteaseChorus = readChorusLines(storedLyrics);
                     }
                 }
 
-                if (cachedNeteaseChorusRanges && cachedNeteaseChorusRanges.length > 0) {
-                    processed = applyNeteaseChorusByTime(processed, cachedNeteaseChorusRanges);
+                if (cachedNeteaseChorus && cachedNeteaseChorus.ranges.length > 0) {
+                    // Ranges read back off guessed lines stay guessed on these lines too.
+                    processed = applyChorusRangesByTime(processed, cachedNeteaseChorus.ranges, Math.random, cachedNeteaseChorus.origin);
                 } else {
                     // Fall back to text-based frequency detection
                     const rebuildLrcText = processed.lines.map(line => `[00:00.00]${line.fullText}`).join('\n');
@@ -106,9 +116,37 @@ export const createLyricsSetter = (
             // its engines have loaded; useIcuFoliaSegmentation bakes it on afterwards in that case.
             processed = applyAutoWordSegmentation(processed);
             // Extension layers (Folium `lyrics.transform`) see the finished lyrics once per load.
-            setLyricsState(applyLyricsTransform(ensureLyricDataRenderHints(processed)));
+            setLyricsState(applyLyricsTransform(rememberLyricsBeforeRules({ ...ensureLyricDataRenderHints(processed)! }, nextLyrics!)));
         } else {
             setLyricsState(null);
         }
     };
+};
+
+/**
+ * Called where a lyric load ends, after its check that the song is still the one asked for: when the
+ * load left the song without lyrics (none found, an instrumental, a failed fetch), an extension
+ * transform may supply some (lyricsForNoLyrics). Not in the setter above: setting null is also how
+ * the app clears lyrics (song start, platform switch, stage reset), and a clear must stay a clear.
+ */
+/**
+ * `change` (a word split) made to lyrics already on screen as one more step of their layout: on the
+ * lyrics before the extension transform, which runs again after it, and still leading back to the
+ * lyrics before the line rules, so lyrics that come back to the setter are filtered once. The
+ * lyrics on screen come back as they are when `change` changes nothing.
+ */
+export const reworkShownLyrics = (
+    shown: LyricData | null,
+    change: (lyrics: LyricData) => LyricData | null,
+): LyricData | null => {
+    const source = untransformedLyrics(shown);
+    if (!source) return shown;
+    const changed = change(source);
+    return !changed || changed === source ? shown : applyLyricsTransform(rememberLyricsBeforeRules(changed, source));
+};
+
+export const supplyLyricsAfterEmptyLoad = () => {
+    if (usePlaybackStore.getState().lyrics !== null) return;
+    const supplied = lyricsForNoLyrics();
+    if (supplied) setPlaybackLyrics(supplied);
 };

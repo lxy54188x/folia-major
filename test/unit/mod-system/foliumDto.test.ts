@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Line, SongResult, Theme } from '@/types';
-import { fromFoliumLines, toFoliumLines, toFoliumSong, toFoliumTheme } from '@/mods/folium/dto';
+import { fromFoliumLines, toFoliumLines, toFoliumPlaybackFailureReason, toFoliumSong, toFoliumTheme } from '@/mods/folium/dto';
+import type { OnlineFailureCaseId } from '@/types/onlineMusic';
 import { FOLIUM_LYRICS_HELPERS, FOLIUM_THEME_HELPERS } from '@/mods/folium/sharedHelpers';
 import { buildLineRenderHints, getLineRenderEndTime, getLineRenderHints } from '@/utils/lyrics/renderHints';
 import { resolveThemeFontStack } from '@/utils/fontStacks';
@@ -116,6 +117,23 @@ describe('fromFoliumLines', () => {
         expect(second.renderHints).toEqual(buildLineRenderHints(second));
     });
 
+    it('keeps where the chorus of a rebuilt chorus line came from, which mods do not see', () => {
+        const fromSource = line({ startTime: 3, endTime: 4, isChorus: true, chorusOrigin: 'source' });
+        const guessed = line({ startTime: 5, endTime: 6, isChorus: true, chorusOrigin: 'text' });
+        const dtos = toFoliumLines([fromSource, guessed]);
+        expect(dtos[0]).not.toHaveProperty('chorusOrigin');
+        const [first, second, added] = fromFoliumLines([fromSource, guessed], dtos, [
+            { ...dtos[0], translation: 'a' },
+            { ...dtos[1], translation: 'b' },
+            { ...dtos[0], startTime: 7, endTime: 8 },
+        ]);
+        expect(first).toMatchObject({ isChorus: true, chorusOrigin: 'source', translation: 'a' });
+        expect(second).toMatchObject({ isChorus: true, chorusOrigin: 'text' });
+        // A chorus line no original line started with: not known to be the source's, so recorded as guessed
+        // (a chorus line without an origin only ever comes from lyrics cached before origins were kept).
+        expect(added).toMatchObject({ isChorus: true, chorusOrigin: 'text' });
+    });
+
     it('drops a word split that no longer joins back to the text', () => {
         const source = line();
         const dtos = toFoliumLines([source]);
@@ -166,6 +184,13 @@ describe('folium.lyrics helpers', () => {
         expect(FOLIUM_LYRICS_HELPERS.getRecentCompletedLine(lines, -1, 3.9)).toBe(lines[1]);
     });
 
+    // Folium 2: a source marks its lyrics instrumental by the host's own rule (Bodian's lyrics@1).
+    it('tells the instrumental notice by the host’s rule', () => {
+        expect(FOLIUM_LYRICS_HELPERS.isPureMusicText('[00:00.000]纯音乐，请欣赏')).toBe(true);
+        expect(FOLIUM_LYRICS_HELPERS.isPureMusicText('[00:01.00]歌里唱到纯音乐，请欣赏也没关系\n[00:02.00]第二句')).toBe(false);
+        expect(FOLIUM_LYRICS_HELPERS.isPureMusicText(null)).toBe(false);
+    });
+
     it('segments words with the saved split first', () => {
         expect(FOLIUM_LYRICS_HELPERS.segmentWords({ fullText: '你好世界', wordSegments: ['你好', '世界'] }).map((part) => part.segment))
             .toEqual(['你好', '世界']);
@@ -195,5 +220,49 @@ describe('toFoliumSong', () => {
         expect(toFoliumSong(song)).toEqual({ id: '42', title: 'Song', artist: 'A / B', album: 'Album', source: 'netease', ref: expect.any(String) });
         expect(toFoliumSong(song)!.ref).toBe(toFoliumSong(song)!.ref);
         expect(toFoliumSong(null)).toBeNull();
+    });
+});
+
+describe('toFoliumPlaybackFailureReason', () => {
+    // Every host reason, with the coarse class mods see. A Record so a reason added to the host type
+    // without a row here fails the type check, and the length check below catches a dropped row.
+    const CLASSES: Record<OnlineFailureCaseId, string> = {
+        'sign-in-needed': 'auth',
+        'account-refused': 'restricted',
+        'subscription-required': 'restricted',
+        'purchase-required': 'restricted',
+        'entitlement-required': 'restricted',
+        'preview-only': 'restricted',
+        'region-restricted': 'restricted',
+        'not-public': 'restricted',
+        'taken-down': 'taken-down',
+        unreachable: 'network',
+        'local-service-stopped': 'network',
+        'retry-later': 'network',
+        'not-configured': 'unknown',
+        'no-audio': 'unknown',
+        'audio-unplayable': 'unknown',
+        refused: 'unknown',
+        unknown: 'unknown',
+    };
+
+    it('classes all seventeen host reasons', () => {
+        expect(Object.keys(CLASSES)).toHaveLength(17);
+        for (const [reason, expected] of Object.entries(CLASSES)) {
+            expect(toFoliumPlaybackFailureReason(reason as OnlineFailureCaseId), reason).toBe(expected);
+        }
+    });
+
+    it('only ever answers one of the five contract classes', () => {
+        const allowed = new Set(['auth', 'restricted', 'taken-down', 'network', 'unknown']);
+        for (const reason of Object.keys(CLASSES)) {
+            expect(allowed.has(toFoliumPlaybackFailureReason(reason as OnlineFailureCaseId))).toBe(true);
+        }
+    });
+
+    it('treats a path without a reason, or a reason it does not know, as unknown', () => {
+        expect(toFoliumPlaybackFailureReason(null)).toBe('unknown');
+        expect(toFoliumPlaybackFailureReason(undefined)).toBe('unknown');
+        expect(toFoliumPlaybackFailureReason('brand-new-reason' as OnlineFailureCaseId)).toBe('unknown');
     });
 });

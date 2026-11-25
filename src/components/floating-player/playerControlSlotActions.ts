@@ -1,10 +1,12 @@
-import { ChartBar, Heart, ListMusic, PanelsTopLeft, Repeat, Repeat1, RepeatOff, Shuffle, SkipBack, SkipForward, Timer, Volume2 } from 'lucide-react';
+import { Captions, ChartBar, Crosshair, Heart, LayoutGrid, ListMusic, PanelsTopLeft, Pin, Repeat, Shuffle, SkipBack, SkipForward, Star, Timer, Volume2 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { PlayerControlSlotActionId } from '../../types/playerControlSlots';
 import { noteLoopButtonPress } from '../../services/ponder/loopShuffleHint';
+import { loopModeIcon, loopModeLabelName } from '../shared/loopModeDisplay';
+import { openSongNotePin } from '../song-notes/songNotePin';
 
 // src/components/floating-player/playerControlSlotActions.ts
-// 进度条胶囊右侧两个可自定义槽位的动作清单。
+// 进度条胶囊上用户能摆的控件清单：右侧两个槽位和胶囊上方浮出的那一排（浮岛）共用这一份。
 //
 // 仓库里没有中心化的播放动作注册表，最接近的是 command palette 的 playbackCommands；
 // 这里只登记「已有图标 + 已有 handler」的播放相关动作，图标沿用那些命令自己声明的那一个。
@@ -48,7 +50,8 @@ export type ResolvedPlayerControlSlot = {
     /** 是否处于「已开启」的高亮态（循环非 off、已喜爱）。 */
     active: boolean;
     disabled: boolean;
-    onActivate: () => void;
+    /** anchor 是点下的那个按钮的位置：「记下这个时刻」把小框弹在它上方，其余动作用不上。 */
+    onActivate: (anchor?: DOMRect) => void;
     labelKey: string;
 };
 
@@ -64,20 +67,38 @@ export const PLAYER_CONTROL_SLOT_OPTIONS: readonly { id: PlayerControlSlotAction
     { id: 'queue', icon: ListMusic, labelKey: 'options.playerControlSlotAction_queue' },
     { id: 'song-wall', icon: PanelsTopLeft, labelKey: 'options.playerControlSlotAction_songWall' },
     { id: 'sleep-timer', icon: Timer, labelKey: 'options.playerControlSlotAction_sleepTimer' },
+    { id: 'locate', icon: Crosshair, labelKey: 'options.playerControlSlotAction_locate' },
+    { id: 'mark-moment', icon: Pin, labelKey: 'options.playerControlSlotAction_markMoment' },
+    { id: 'add-to-playlist', icon: Star, labelKey: 'options.playerControlSlotAction_addToPlaylist' },
+    { id: 'subtitles', icon: Captions, labelKey: 'options.playerControlSlotAction_subtitles' },
+    { id: 'lyric-style', icon: LayoutGrid, labelKey: 'options.playerControlSlotAction_lyricStyle' },
 ];
 
-/** 循环按钮的图标反映当前模式，是这批动作里唯一的三态图标。 */
-const resolveLoopIcon = (loopMode: PlayerControlSlotContext['loopMode']): LucideIcon => {
-    if (loopMode === 'off') return RepeatOff;
-    if (loopMode === 'one') return Repeat1;
-    return Repeat;
+/**
+ * 槽位动作和命令面板里做同一件事的那条命令。歌词时间轴没有对应命令，不在表里。
+ * 用来判断「面板里常用的这条命令能不能放进槽位」。
+ */
+export const PLAYER_CONTROL_SLOT_COMMAND_IDS: Readonly<Record<Exclude<PlayerControlSlotActionId, 'lyrics-timeline'>, string>> = {
+    loop: 'playback-loop',
+    prev: 'playback-prev',
+    next: 'playback-next',
+    shuffle: 'playback-shuffle',
+    like: 'playback-like',
+    volume: 'playback-volume',
+    queue: 'queue',
+    'song-wall': 'navigate-lattice',
+    'sleep-timer': 'sleep-timer',
+    locate: 'locate-playing-song',
+    'mark-moment': 'song-notes-mark-moment',
+    'add-to-playlist': 'playback-add-to-playlist',
+    subtitles: 'settings-subtitles',
+    'lyric-style': 'visualizer-picker',
 };
 
-/** 循环按钮的提示文本反映当前模式。 */
-const resolveLoopLabelKey = (loopMode: PlayerControlSlotContext['loopMode']): string => {
-    if (loopMode === 'off') return 'player.loopOff';
-    if (loopMode === 'one') return 'player.loopOne';
-    return 'player.loopAll';
+/** 命令 id 反查槽位动作；不是任何槽位动作的命令返回 null。 */
+export const playerControlSlotActionForCommand = (commandId: string): PlayerControlSlotActionId | null => {
+    const entry = Object.entries(PLAYER_CONTROL_SLOT_COMMAND_IDS).find(([, id]) => id === commandId);
+    return entry ? entry[0] as PlayerControlSlotActionId : null;
 };
 
 /**
@@ -91,7 +112,8 @@ export const resolvePlayerControlSlot = (
     switch (id) {
         case 'loop':
             return {
-                icon: resolveLoopIcon(context.loopMode),
+                // 循环按钮的图标和提示文本反映当前模式，是这批动作里唯一的三态图标。
+                icon: loopModeIcon(context.loopMode),
                 filled: false,
                 active: context.loopMode !== 'off',
                 disabled: false,
@@ -100,7 +122,7 @@ export const resolvePlayerControlSlot = (
                     context.onToggleLoop();
                     noteLoopButtonPress();
                 },
-                labelKey: resolveLoopLabelKey(context.loopMode),
+                labelKey: `player.${loopModeLabelName(context.loopMode)}`,
             };
         case 'prev':
             return {
@@ -143,8 +165,8 @@ export const resolvePlayerControlSlot = (
                 icon: Volume2,
                 filled: false,
                 active: false,
-                disabled: !context.canInvokeCommandById('playback-volume'),
-                onActivate: () => context.invokeCommandById('playback-volume'),
+                disabled: !context.canInvokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS.volume),
+                onActivate: () => context.invokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS.volume),
                 labelKey: 'options.playerControlSlotAction_volume',
             };
         case 'queue':
@@ -152,8 +174,8 @@ export const resolvePlayerControlSlot = (
                 icon: ListMusic,
                 filled: false,
                 active: false,
-                disabled: !context.canInvokeCommandById('queue'),
-                onActivate: () => context.invokeCommandById('queue'),
+                disabled: !context.canInvokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS.queue),
+                onActivate: () => context.invokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS.queue),
                 labelKey: 'options.playerControlSlotAction_queue',
             };
         case 'song-wall':
@@ -163,8 +185,8 @@ export const resolvePlayerControlSlot = (
                 active: false,
                 // The command hides itself on the wall, so the slot greys out there instead of
                 // offering a trip to the surface the user is already looking at.
-                disabled: !context.canInvokeCommandById('navigate-lattice'),
-                onActivate: () => context.invokeCommandById('navigate-lattice'),
+                disabled: !context.canInvokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS['song-wall']),
+                onActivate: () => context.invokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS['song-wall']),
                 labelKey: 'options.playerControlSlotAction_songWall',
             };
         case 'sleep-timer':
@@ -172,10 +194,44 @@ export const resolvePlayerControlSlot = (
                 icon: Timer,
                 filled: false,
                 active: false,
-                disabled: !context.canInvokeCommandById('sleep-timer'),
-                onActivate: () => context.invokeCommandById('sleep-timer'),
+                disabled: !context.canInvokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS['sleep-timer']),
+                onActivate: () => context.invokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS['sleep-timer']),
                 labelKey: 'options.playerControlSlotAction_sleepTimer',
             };
+        case 'locate':
+            return {
+                icon: Crosshair,
+                filled: false,
+                active: false,
+                disabled: !context.canInvokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS.locate),
+                onActivate: () => context.invokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS.locate),
+                labelKey: 'options.playerControlSlotAction_locate',
+            };
+        case 'mark-moment':
+            return {
+                icon: Pin,
+                filled: false,
+                active: false,
+                // 和命令同一套判断：没在播、或是外部播放器的舞台歌，就不能记。
+                disabled: !context.canInvokeCommandById(PLAYER_CONTROL_SLOT_COMMAND_IDS['mark-moment']),
+                onActivate: anchor => openSongNotePin(anchor),
+                labelKey: 'options.playerControlSlotAction_markMoment',
+            };
+        case 'add-to-playlist':
+        case 'subtitles':
+        case 'lyric-style': {
+            // 打开命令面板里那块界面（加到歌单、字幕调节、歌词样式选择器），和命令同一套可用判断。
+            const commandId = PLAYER_CONTROL_SLOT_COMMAND_IDS[id];
+            const option = PLAYER_CONTROL_SLOT_OPTIONS.find(entry => entry.id === id);
+            return {
+                icon: option?.icon ?? LayoutGrid,
+                filled: false,
+                active: false,
+                disabled: !context.canInvokeCommandById(commandId),
+                onActivate: () => context.invokeCommandById(commandId),
+                labelKey: option?.labelKey ?? 'options.playerControlSlotAction_lyricStyle',
+            };
+        }
         case 'lyrics-timeline':
         default:
             return {

@@ -1,7 +1,9 @@
 import { PINYIN_BY_PHRASE } from 'virtual:folia-command-pinyin';
 import en from '../../../i18n/locales/en';
 import zhCN from '../../../i18n/locales/zh-CN';
+import zhTW from 'virtual:folia-locale-zh-TW';
 import ind from '../../../i18n/locales/in';
+import vi from '../../../i18n/locales/vi';
 import type { CommandPaletteCommand } from '../types';
 import { normalizeSearchText, splitWords } from './normalize';
 
@@ -21,7 +23,9 @@ type LocaleCommandText = Record<string, { title?: string; description?: string }
 const LOCALE_COMMAND_TEXT: Record<string, LocaleCommandText> = {
     en: ((en as any).commandPalette?.commands ?? {}) as LocaleCommandText,
     'zh-CN': ((zhCN as any).commandPalette?.commands ?? {}) as LocaleCommandText,
+    'zh-TW': ((zhTW as any).commandPalette?.commands ?? {}) as LocaleCommandText,
     in: ((ind as any).commandPalette?.commands ?? {}) as LocaleCommandText,
+    vi: ((vi as any).commandPalette?.commands ?? {}) as LocaleCommandText,
 };
 
 const CJK = /[一-鿿㐀-䶿]/;
@@ -112,7 +116,11 @@ const buildEntry = (command: CommandPaletteCommand, locale: string): CommandSear
     });
 
     const englishText = localeText('en', command.id);
-    const activeText = locale === 'en' ? undefined : localeText(locale, command.id);
+    // A command whose text is made at run time (a source's name in it, a mod's label) has no row in the build-time
+    // tables: its title and description as they read now stand for the current language (the entry is rebuilt
+    // when the language changes, and such commands are made anew when their text does).
+    const runtimeText = command.textSource === 'runtime' ? { title: command.title, description: command.description } : undefined;
+    const activeText = runtimeText ?? (locale === 'en' ? undefined : localeText(locale, command.id));
     const chineseText = localeText('zh-CN', command.id);
 
     // 2. 英文标题恒定入索引：删掉手写英文别名后，中文界面下仍要能用英文搜到。

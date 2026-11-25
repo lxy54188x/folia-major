@@ -3,8 +3,9 @@ import type { GridViewCollectionDescriptor } from './gridViewCollectionAdapters'
 import type { HomeSurfaceProps } from './homeSurfaceTypes';
 import { resolveSearchSource, type SearchSource } from '../../../stores/useSearchNavigationStore';
 import type { ProviderAccountSummary } from '../../../types/onlineMusic';
-import type { LibraryAccountController } from '../../../library/core/contracts/account';
+import type { LibraryAccountController } from '../../../library/core/account/account.contract';
 import { openSettings } from '../../../stores/useSettingsModalStore';
+import { noteQueueStarted } from '../playing-song-locator/playingSongLocator';
 
 // src/components/app/home/buildHomeModel.ts
 
@@ -26,11 +27,15 @@ type HomeModelAmbient = {
     navidromeEnabled: HomeSurfaceProps['navidromeEnabled'];
 };
 
+// The playlists shown without a platform: one array, so that what is drawn from it is not drawn again.
+const NO_PLAYLISTS: HomeSurfaceProps['playlists'] = [];
+
 export type HomeModelDeps = {
     account: LibraryAccountController;
     /** controller 快照里的当前平台摘要（未变时身份稳定）；首页的账户与在线歌单优先取它。 */
     activeProvider?: ProviderAccountSummary;
-    playSong: HomeSurfaceProps['onPlaySong'];
+    // App's playSong: its 4th argument is navigation options, not the surface's `from`, so it is wrapped below.
+    playSong: (song: SongResult, queue?: SongResult[], isFmCall?: boolean) => void;
     navigateToPlayer: HomeSurfaceProps['onBackToPlayer'];
     navigateToLattice: NonNullable<HomeSurfaceProps['onOpenLattice']>;
     /** fb3：暂停 / 继续（应用的 togglePlay；useHomeModel 给它稳定身份）。 */
@@ -38,15 +43,13 @@ export type HomeModelDeps = {
     /** fb3：按「播放后进入的视图」进入播放视图（播放胶囊的同一个导航）。 */
     enterPlaybackView: NonNullable<HomeSurfaceProps['onEnterPlaybackView']>;
     refreshOnlineProviderPlaylists: () => Promise<unknown>;
-    user: HomeSurfaceProps['user'];
-    playlists: HomeSurfaceProps['playlists'];
-    cloudPlaylist?: HomeSurfaceProps['cloudPlaylist'];
     focusedPlaylistIndex?: HomeSurfaceProps['focusedPlaylistIndex'];
     setFocusedPlaylistIndex?: HomeSurfaceProps['setFocusedPlaylistIndex'];
     navigateToSearch: (args: { query: string; sourceTab: SearchSource; replace?: boolean }) => void;
     localSongs: HomeSurfaceProps['localSongs'];
     localLibraryCatalog: HomeSurfaceProps['localLibraryCatalog'];
     localPlaylists: HomeSurfaceProps['localPlaylists'];
+    onRefreshLocalPlaylists: HomeSurfaceProps['onRefreshLocalPlaylists'];
     onRefreshLocalSongs: HomeSurfaceProps['onRefreshLocalSongs'];
     onAddLocalSongToQueue?: HomeSurfaceProps['onAddLocalSongToQueue'];
     localMusicState: HomeSurfaceProps['localMusicState'];
@@ -58,6 +61,8 @@ export type HomeModelDeps = {
     openStagePlayer: () => Promise<void>;
     theme: HomeSurfaceProps['theme'];
     playAll: (songs: SongResult[]) => void;
+    /** 随机播放：这批歌打乱后再从头播（播放控制器决定怎么洗，「一轮不重复」也在那里）。 */
+    shufflePlayAll: (songs: SongResult[]) => void;
     addAllToQueue: (songs: SongResult[], options?: { suppressToast?: boolean }) => number | void;
     addSongToQueue: (song: SongResult) => void;
     onStatusMessage?: HomeSurfaceProps['onStatusMessage'];
@@ -79,9 +84,6 @@ export const buildHomeModel = ({
     togglePlayback,
     enterPlaybackView,
     refreshOnlineProviderPlaylists,
-    user,
-    playlists,
-    cloudPlaylist,
     currentSong,
     focusedPlaylistIndex,
     setFocusedPlaylistIndex,
@@ -89,6 +91,7 @@ export const buildHomeModel = ({
     localSongs,
     localLibraryCatalog,
     localPlaylists,
+    onRefreshLocalPlaylists,
     onRefreshLocalSongs,
     onAddLocalSongToQueue,
     localMusicState,
@@ -102,6 +105,7 @@ export const buildHomeModel = ({
     theme,
     navidromeEnabled,
     playAll,
+    shufflePlayAll,
     addAllToQueue,
     addSongToQueue,
     onStatusMessage,
@@ -110,6 +114,9 @@ export const buildHomeModel = ({
     onPopCollectionTo,
     onBackCollection,
 }: BuildHomeModelParams): HomeViewModel => {
+    // Whatever starts a queue from the home screen says where: on a collection's page (`from`),
+    // or anywhere else (the explore tab, an artist's page, a card's own "play", the personal
+    // radio). "Locate the playing song" goes by it (playing-song-locator/playingSongLocator.ts).
     return {
         account,
         onOpenCollection,
@@ -117,18 +124,28 @@ export const buildHomeModel = ({
         onPopCollectionTo,
         onBackCollection,
         surfaceProps: {
-            onPlaySong: playSong,
+            onPlaySong: (song, queue, isFmCall, from) => {
+                // (A song played with no queue of its own joins the queue there is.)
+                if (queue?.length) noteQueueStarted(from ?? null, [song, ...queue]);
+                playSong(song, queue, isFmCall);
+            },
             onBackToPlayer: navigateToPlayer,
             onOpenLattice: navigateToLattice,
             onTogglePlayback: togglePlayback,
             onEnterPlaybackView: enterPlaybackView,
             onRefreshUser: () => refreshOnlineProviderPlaylists(),
             // An anonymous selected provider must not inherit a different platform's account.
-            user: activeProvider ? activeProvider.user : user,
-            playlists: activeProvider?.collections.filter(collection => collection.type !== 'cloud') ?? playlists,
-            cloudPlaylist: activeProvider?.collections.find(collection => collection.type === 'cloud') ?? cloudPlaylist,
+            // The active platform's account, as the account layer holds it; none without a platform (Folium 2.0 §7).
+            user: activeProvider?.user ?? null,
+            playlists: activeProvider?.collections.filter(collection => collection.type !== 'cloud') ?? NO_PLAYLISTS,
+            cloudPlaylist: activeProvider?.collections.find(collection => collection.type === 'cloud') ?? null,
             currentTrack: currentSong,
-            onPlayAll: playAll,
+            onPlayAll: (songs, from, options) => {
+                noteQueueStarted(from ?? null, songs);
+                // 随机播放：整批交给播放控制器打乱再播，第一首也是随机的。
+                if (options?.shuffle) shufflePlayAll(songs);
+                else playAll(songs);
+            },
             onAddAllToQueue: addAllToQueue,
             onAddSongToQueue: addSongToQueue,
             onStatusMessage,
@@ -141,6 +158,7 @@ export const buildHomeModel = ({
             localSongs,
             localLibraryCatalog,
             localPlaylists,
+            onRefreshLocalPlaylists,
             onRefreshLocalSongs,
             onAddLocalSongToQueue,
             localMusicState,

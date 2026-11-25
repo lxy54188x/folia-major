@@ -1,4 +1,4 @@
-import { Gauge, KeyRound, LayoutGrid, ListOrdered, Smartphone, Zap } from 'lucide-react';
+import { ListMusic, MessageSquareText, Puzzle, SlidersVertical, Sparkles, Store } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 // src/components/modal/newFeaturesRelease.ts
@@ -6,26 +6,26 @@ import type { LucideIcon } from 'lucide-react';
 type NewFeatureCard = {
     id: string;
     icon: LucideIcon;
-    daylightIconClassName: string;
-    darkIconClassName: string;
 };
 
 type NewFeaturesRelease = {
     i18nKey: string;
-    /** 重大更新：介绍上方显示「<代号> Update · 重大更新」标签；代号不翻译，文案在 help.majorUpdateLabel。 */
-    majorUpdate?: { codename: string };
+    /** 重大更新：介绍上方显示「<代号> Update · 重大更新」标签；代号不翻译，文案在 help.majorUpdateLabel。
+     *  servicePack：同一重大更新的热修复版，标签改成「<代号> Update SP<n> · 重大更新」，文案在 help.servicePackLabel。 */
+    majorUpdate?: { codename: string; servicePack?: number };
     features: NewFeatureCard[];
 };
 
 // Defines the current release's cards; their localized text lives under i18nKey in every locale.
 export const NEW_FEATURES_RELEASE: NewFeaturesRelease = {
-    i18nKey: 'releaseNotes.v0_7_18',
+    i18nKey: 'releaseNotes.v0_8_1',
+    majorUpdate: { codename: 'Severance', servicePack: 1 },
     features: [
-        { id: 'queueIsland', icon: ListOrdered, daylightIconClassName: 'text-violet-600', darkIconClassName: 'text-violet-400' },
-        { id: 'wallTools', icon: LayoutGrid, daylightIconClassName: 'text-sky-600', darkIconClassName: 'text-sky-400' },
-        { id: 'visualizerPerf', icon: Gauge, daylightIconClassName: 'text-amber-600', darkIconClassName: 'text-amber-400' },
-        { id: 'localPlayback', icon: Zap, daylightIconClassName: 'text-rose-600', darkIconClassName: 'text-rose-400' },
-        { id: 'qqDeviceLimit', icon: Smartphone, daylightIconClassName: 'text-emerald-600', darkIconClassName: 'text-emerald-400' },
-        { id: 'aiKeySecure', icon: KeyRound, daylightIconClassName: 'text-cyan-600', darkIconClassName: 'text-cyan-400' },
+        { id: 'sourceMods', icon: Puzzle },
+        { id: 'modMarket', icon: Store },
+        { id: 'foliaPlaylists', icon: ListMusic },
+        { id: 'moments', icon: MessageSquareText },
+        { id: 'stemMixer', icon: SlidersVertical },
+        { id: 'moreDetails', icon: Sparkles },
     ],
 };

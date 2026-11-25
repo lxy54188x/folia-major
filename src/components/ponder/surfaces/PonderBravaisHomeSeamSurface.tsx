@@ -8,10 +8,8 @@ import {
     EyeOff,
     Folder,
     FoldHorizontal,
-    Library,
     ListFilter,
     ListMusic,
-    LogOut,
     MicVocal,
     MonitorPlay,
     MoreHorizontal,
@@ -25,7 +23,7 @@ import {
     X,
 } from 'lucide-react';
 import PonderSurfaceStateLayer, { PonderSurfaceBase, type PonderSurfaceStateRegistrar } from './PonderSurfaceStateLayer';
-import { relativeRectStyle } from './ponderSurfaceGeometry';
+import { relativeRectStyle } from './relativeRectStyle';
 import {
     BRAVAIS_HOME_DOCK,
     BRAVAIS_HOME_DOCK_STAGE,
@@ -64,18 +62,19 @@ type PonderBravaisHomeSeamSurfaceProps = {
     registerStateNode?: PonderSurfaceStateRegistrar;
 };
 
-/** 一级页签的「字数」：歌单、电台、专辑、本地、Navi。 */
-const TAB_GLYPHS = [2, 2, 2, 2, 4] as const;
-const ONLINE_TAB = 0;
-const LOCAL_TAB = 3;
+// 一级页签是首页两级页签的组：Folia、当前在线音源、本地、Navidrome（西文的两个字小一号）。
+const TAB_GLYPHS = [3, 2, 2, 4] as const;
+const SMALL_TABS: readonly number[] = [0, 3];
+const ONLINE_TAB = 1;
+const LOCAL_TAB = 2;
 
 type HomeSeamOptions = {
     tab: number;
-    /** 本地页签：中段多一列二级切换，直达入口换成本地的两张。 */
+    /** 本地页签：中段多一列二级切换（三页），直达入口换成本地的那一张（全部歌曲）。 */
     local?: boolean;
     stage?: boolean;
     filtering?: boolean;
-    popup?: 'account' | 'menu';
+    popup?: 'menu';
 };
 
 const ShortcutColumns: React.FC<{ rect: typeof H.shortcuts; counts: readonly number[]; rule: boolean; outline: string }> = ({ rect, counts, rule, outline }) => (
@@ -101,7 +100,7 @@ const HomeSeam: React.FC<{ colors: BravaisSeamColors; options: HomeSeamOptions }
             <SeamIcon rect={H.fold} icon={FoldHorizontal} marker="data-ponder-bravais-fold" />
 
             <div data-ponder-bravais-tabs style={relativeRectStyle(H.tabs)} />
-            {H.tab.map((rect, index) => {
+            {H.tab.slice(0, TAB_GLYPHS.length).map((rect, index) => {
                 const active = index === options.tab;
                 return (
                     <span
@@ -111,7 +110,7 @@ const HomeSeam: React.FC<{ colors: BravaisSeamColors; options: HomeSeamOptions }
                         className="flex items-center justify-center rounded-[10px]"
                         style={{ ...relativeRectStyle(rect), backgroundColor: active ? 'rgba(255,255,255,0.13)' : undefined }}
                     >
-                        <VerticalGlyphs count={TAB_GLYPHS[index]} size={index === 4 ? '8px' : '13px'} gap="2px" color={BRAVAIS_SEAM_INK} opacity={active ? 1 : 0.5} />
+                        <VerticalGlyphs count={TAB_GLYPHS[index]} size={SMALL_TABS.includes(index) ? '8px' : '13px'} gap="2px" color={BRAVAIS_SEAM_INK} opacity={active ? 1 : 0.5} />
                     </span>
                 );
             })}
@@ -123,11 +122,11 @@ const HomeSeam: React.FC<{ colors: BravaisSeamColors; options: HomeSeamOptions }
                         <Folder className="h-3.5 w-3.5" />
                         <VerticalGlyphs count={3} size="8px" gap="2px" color={accent} opacity={0.9} />
                     </span>
-                    {[DiscAlbum, MicVocal, Library].map((Icon, index) => <Icon key={index} className="h-3.5 w-3.5 opacity-50" />)}
+                    {[DiscAlbum, MicVocal].map((Icon, index) => <Icon key={index} className="h-3.5 w-3.5 opacity-50" />)}
                 </div>
             )}
 
-            <ShortcutColumns rect={shortcutsRect} counts={options.local ? [4, 3] : [6, 2]} rule={Boolean(options.local)} outline={outline} />
+            <ShortcutColumns rect={shortcutsRect} counts={options.local ? [4] : [6, 2]} rule={Boolean(options.local)} outline={outline} />
 
             {options.filtering && (
                 <div data-ponder-bravais-filter className="flex items-center gap-[6%] border-b-2 px-[4%]" style={{ ...relativeRectStyle(H.filter), borderColor: accent }}>
@@ -158,31 +157,6 @@ const HomeSeam: React.FC<{ colors: BravaisSeamColors; options: HomeSeamOptions }
             <SeamIcon rect={dock.settings} icon={Settings} marker="data-ponder-bravais-tool-settings" />
             <SeamIcon rect={dock.queue} icon={PanelsTopLeft} marker="data-ponder-bravais-tool-queue" />
             <SeamIcon rect={dock.more} icon={MoreHorizontal} marker="data-ponder-bravais-tool-more" pressed={options.popup === 'menu'} accent={accent} outline={outline} />
-
-            {options.popup === 'account' && (
-                <div
-                    data-ponder-bravais-account-popup
-                    className="flex flex-col justify-evenly rounded-[10px] px-[7%] shadow-2xl"
-                    style={{ ...relativeRectStyle(H.accountPopup), backgroundColor: BRAVAIS_SEAM_POPUP, boxShadow: `0 0 0 1px ${outline}, 0 10px 30px rgba(0,0,0,0.5)` }}
-                >
-                    {[0, 1, 2, 3].map(index => {
-                        const current = index === 0;
-                        return (
-                            <span key={index} className="flex items-center gap-[8%]">
-                                <span
-                                    className="aspect-square w-[22%] shrink-0 rounded-full"
-                                    style={{ backgroundColor: index === 0 ? accent : line, opacity: current ? 0.9 : 0.6, boxShadow: current ? `0 0 0 2px ${line}` : undefined }}
-                                />
-                                <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
-                                    <TextBar width={`${80 - index * 8}%`} color={line} className="h-1" />
-                                    {index !== 3 && <TextBar width="48%" color={line} className="h-[3px]" opacity={0.5} />}
-                                </span>
-                                {current && <LogOut data-ponder-bravais-logout className="h-3 w-3 shrink-0 opacity-75" />}
-                            </span>
-                        );
-                    })}
-                </div>
-            )}
 
             {options.popup === 'menu' && (
                 <div
@@ -309,15 +283,6 @@ const PonderBravaisHomeSeamSurface: React.FC<PonderBravaisHomeSeamSurfaceProps> 
             {/* 换页签：整条信息条翻一次，墙整面换成本地那一页（同样的格子，换一批磁贴）。 */}
             <PonderSurfaceStateLayer state="home-local" registerStateNode={registerStateNode} replaces>
                 <HomeView colors={colors} options={{ tab: LOCAL_TAB, local: true }} wall="b" />
-            </PonderSurfaceStateLayer>
-
-            <PonderSurfaceStateLayer state="account-open" registerStateNode={registerStateNode} replaces>
-                <HomeView colors={colors} options={{ tab: ONLINE_TAB, popup: 'account' }} />
-            </PonderSurfaceStateLayer>
-
-            {/* 平台列表收起：回到和最开始一样的那一屏（列表画在那一屏里，收起就是换回去）。 */}
-            <PonderSurfaceStateLayer state="base-again" registerStateNode={registerStateNode} replaces>
-                <HomeView colors={colors} options={{ tab: ONLINE_TAB }} />
             </PonderSurfaceStateLayer>
 
             <PonderSurfaceStateLayer state="menu-open" registerStateNode={registerStateNode} replaces>

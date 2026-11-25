@@ -1,15 +1,19 @@
-import { useEffect, useMemo, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { MotionValue } from 'framer-motion';
 import { PlayerState, type SongResult, type LyricData } from '../../../types';
+import type { OmniCollection, OmniProviderId } from '../../../types/onlineMusic';
 import LatticePlaybackProvider, { type LatticePlaybackActions } from './LatticePlaybackProvider';
 import { LatticeTransportContext, type LatticeTransport } from './LatticeTransportContext';
 import PosterWall from './PosterWall';
+import RadioWall from './radio/RadioWall';
 import LatticeFocusButton from './LatticeFocusButton';
 import WallBackButton from '../../wall/WallBackButton';
 import { buildLatticeTiles, type LatticeTile } from './latticeModel';
 import { useStableCallbacks } from '../../../hooks/useStableCallbacks';
 import { useLatticeSettingsStore } from '../../../stores/useLatticeSettingsStore';
+import { useAppViewStore } from '../../../stores/useAppViewStore';
 import { countRender } from '../../../dev/renderCount';
 import '../../wall/wall.css';
 import './Lattice.css';
@@ -19,8 +23,17 @@ import { getPlaybackSongKey } from '../../../utils/appPlaybackGuards';
 import { isPrimaryModifierPressed, isSecondaryModifierPressed } from '../../../utils/platform';
 import { isTextEntryTarget } from '../../../utils/keyboardTargets';
 import { resolveWallHandoffRole, useWallHandoffStore } from '../../../stores/useWallHandoffStore';
+import { useExploreWall } from './useExploreWall';
+import { useReducedMotionFor } from '../../../hooks/useReducedMotionFor';
+import { isFlightBackArmed, planPageFromWall } from './wallFlight';
+import { beginWallTrip, WallTripLog } from './wallTripLog';
+import { LATTICE_WALL_ATTR } from '../../collectionFlight';
 
-// Queue display layer; it renders the play queue and never mutates it.
+// The wall's display layer. It renders the play queue and never mutates it; opened from the
+// explore tab (`latticeSource` in useAppViewStore) it renders the explore page's entries in the
+// queue's place (useExploreWall.ts), and the queue stays what the player plays. The queue can also be drawn as
+// the radio wall (radio/RadioWall.tsx, a ring of cards): the wall form setting (useLatticeSettingsStore.latticeWallForm)
+// picks it for a plain queue, and Personal FM always has it, its cards played within the radio.
 // 翻牌交接（设计稿 §7「进入队列」，与资料库墙 bravais）：根节点挂 data-wall-handoff（in / out）与阶段。叠在资料库墙上面的
 // 这段时间里墙面底色不画（下面那面墙的墙面就是同一份），颗粒与暗角由上面这层统一画一份（见 Lattice.css）。
 
@@ -32,6 +45,8 @@ type LatticeProps = {
     currentSong: SongResult | null;
     playerState: PlayerState;
     currentTime: MotionValue<number>;
+    /** The lyric clock, for the lyric timeline: media time + preview clip start - manual lyric offset. */
+    lyricCurrentTime: MotionValue<number>;
     playbackDuration: number;
     canTogglePlayback: boolean;
     queue: SongResult[];
@@ -40,9 +55,15 @@ type LatticeProps = {
     /** 工具面板的「主页」：总是回首页（左上角返回仍是历史返回）；缺省时没有那一格。 */
     onGoHome?: () => void;
     onOpenPlayer: () => void;
-    onPlaySong: (song: SongResult, queue: SongResult[]) => void;
+    /** `asFm`: a card of the radio wall, played within Personal FM (the queue stays the radio's). */
+    onPlaySong: (song: SongResult, queue: SongResult[], asFm: boolean) => void;
     onTogglePlayback: () => void;
     onSeek: (time: number) => void;
+    /** For a wall of the explore page's entries: the provider and the account the explore tab shows its page for. */
+    exploreProviderId?: OmniProviderId;
+    exploreAccountId?: string;
+    /** For a wall of the explore page's entries: opens a collection's page, as the explore tab does for a card. */
+    onOpenCollection?: (collection: OmniCollection) => void;
 };
 
 export default function Lattice({
@@ -53,6 +74,7 @@ export default function Lattice({
     currentSong,
     playerState,
     currentTime,
+    lyricCurrentTime,
     playbackDuration,
     canTogglePlayback,
     queue,
@@ -63,6 +85,9 @@ export default function Lattice({
     onPlaySong,
     onTogglePlayback,
     onSeek,
+    exploreProviderId,
+    exploreAccountId = '',
+    onOpenCollection,
 }: LatticeProps) {
     countRender('Lattice');
     const { t } = useTranslation();
@@ -72,7 +97,39 @@ export default function Lattice({
     const posterTintUseCustomColor = useLatticeSettingsStore(state => state.latticePosterTintUseCustomColor);
     const posterTintColor = useLatticeSettingsStore(state => state.latticePosterTintColor);
     const posterTintIntensity = useLatticeSettingsStore(state => state.latticePosterTintIntensity);
-    const tiles = useMemo(() => buildLatticeTiles({ queue, currentSong }), [currentSong, queue]);
+    const badgeCurrentOnly = useLatticeSettingsStore(state => state.latticeBadgeCurrentOnly);
+    // Set by the way the wall was opened, and the same for as long as it is up.
+    const isExplore = useAppViewStore(state => state.latticeSource) === 'explore';
+    // The queue as the radio wall: always in Personal FM (it comes and goes with FM while the wall is up),
+    // and for a plain queue when the wall form setting says so.
+    const wallForm = useLatticeSettingsStore(state => state.latticeWallForm);
+    const radioHidesUpcoming = useLatticeSettingsStore(state => state.latticeRadioHideUpcoming);
+    const isFm = controls.playback.isFmMode;
+    const isRadio = !isExplore && (isFm || wallForm === 'radio');
+    const explore = useExploreWall({ isOn: isExplore, currentSong, providerId: exploreProviderId, accountId: exploreAccountId });
+    const queueTiles = useMemo(() => buildLatticeTiles({ queue, currentSong }), [currentSong, queue]);
+    const tiles = isExplore ? explore.tiles : queueTiles;
+    // The tile whose collection page the wall was left for, when this is the way back from that
+    // page: the wall opens on it. Read once and let go of, so that no later opening starts there.
+    // Let go of again when the view comes back to a wall that is still up: Back, pressed while
+    // the wall leaves for the page, calls this same wall back, and nothing mounts to read the tile.
+    const [startTileId] = useState(() => useAppViewStore.getState().latticeReturnTileId);
+    useEffect(() => {
+        useAppViewStore.getState().setLatticeReturnTileId(null);
+        return useAppViewStore.subscribe((state, before) => {
+            if (state.view === 'lattice' && before.view !== 'lattice') state.setLatticeReturnTileId(null);
+        });
+    }, []);
+    const isReturn = startTileId !== null;
+    // The cover of a collection's tile flies to the tile's page, and back from it
+    // (the grid's morph, wallFlight.ts), unless motion is reduced for that flight or for the wall.
+    const reducedMotion = useReducedMotionFor('lattice');
+    const coverFlies = !useReducedMotionFor('collectionMorph') && !reducedMotion;
+    // Come back to with a flight armed, the wall has the page under it and fades in over it.
+    // With none armed nothing is under the wall, which may be the bare window (the app's
+    // background can be see-through): it is put up at once. (wallLayer.ts asks the same, to keep
+    // the visualizer under a wall that fades in until that wall covers it.)
+    const [fadesIn] = useState(() => isReturn && isFlightBackArmed());
     const handoffSession = useWallHandoffStore(state => state.session);
     const handoffRole = resolveWallHandoffRole(handoffSession, 'lattice');
     const handoffPhase = handoffSession?.phase;
@@ -105,10 +162,40 @@ export default function Lattice({
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [onBack]);
 
+    // The card's own action. A song is played: within the queue there is on the queue wall,
+    // with the songs of its section on the explore wall, as the explore page plays it. A
+    // collection's page is opened; the wall is taken down meanwhile, and Back opens it on
+    // this tile again. The tile, which is the grown one, is the card whose cover flies to
+    // the page: captured, and the page's plan made, before the navigation (wallFlight.ts).
+    // A wall that has been left stays on the screen, and can be pressed, while it leaves:
+    // a press then (Open pressed twice, Enter held down) opens no page and plays no song.
+    const playTile = (tile: LatticeTile) => {
+        const appView = useAppViewStore.getState();
+        if (appView.view !== 'lattice') return;
+        if (tile.kind === 'song') {
+            onPlaySong(tile.song, tile.queue ?? queue, isRadio && isFm);
+            return;
+        }
+        beginWallTrip('open');
+        planPageFromWall(coverFlies);
+        appView.setLatticeReturnTileId(tile.id);
+        appView.setIsLatticeLeftForPage(true);
+        onOpenCollection?.(tile.collection);
+    };
+
     // App rebuilds these on every render of its own, and the wall hands them to every poster on
     // screen. Given a permanent identity here they stop being a reason for those posters to render.
     const wall = useStableCallbacks({
-        onPlay: (tile: LatticeTile) => onPlaySong(tile.song, queue),
+        onPlay: playTile,
+        // #834 a double click on a poster: the tile's own action, as the play button on the poster
+        // does it, except that the song playing is resumed when paused and never paused.
+        onPlayFromWall: (tile: LatticeTile) => {
+            if (tile.kind === 'song' && tile.section === 'now' && canTogglePlayback) {
+                if (playerState !== PlayerState.PLAYING) onTogglePlayback();
+                return;
+            }
+            playTile(tile);
+        },
         onTogglePlayback,
         onSeek,
         onOpenPlayer,
@@ -124,11 +211,11 @@ export default function Lattice({
     return (
         <LatticeTransportContext.Provider value={transport}>
         <LatticePlaybackProvider actions={controls} currentSong={currentSong} queue={queue} lyrics={lyrics}
-            currentTime={currentTime} duration={playbackDuration} onSeek={onSeek} isDaylight={isDaylight}>
+            currentTime={currentTime} lyricCurrentTime={lyricCurrentTime} duration={playbackDuration} onSeek={onSeek} isDaylight={isDaylight}>
         <LatticeLyricsProvider source={lyricSource} songKey={currentSong ? getPlaybackSongKey(currentSong) : ''}
             keywordColoringEnabled={lyricKeywordColoringEnabled}>
         <section
-            className={`lattice-root lattice-queue-root ${isDaylight ? 'is-daylight' : ''} ${vignette ? 'has-vignette' : ''} ${lightsOn ? '' : 'is-lights-out'} ${posterTintEnabled ? 'has-poster-tint' : ''} ${posterTintUseCustomColor ? 'uses-custom-poster-tint' : ''} ${surfaceOff ? 'is-handoff-surface-off' : ''}`}
+            className={`lattice-root lattice-queue-root ${isDaylight ? 'is-daylight' : ''} ${vignette ? 'has-vignette' : ''} ${lightsOn ? '' : 'is-lights-out'} ${posterTintEnabled ? 'has-poster-tint' : ''} ${posterTintUseCustomColor ? 'uses-custom-poster-tint' : ''} ${badgeCurrentOnly ? 'has-badge-current-only' : ''} ${surfaceOff ? 'is-handoff-surface-off' : ''} ${fadesIn && !reducedMotion ? 'is-returning' : ''} ${isRadio ? 'is-radio' : ''}`}
             data-wall-handoff={handoffRole ?? undefined}
             data-wall-handoff-phase={handoffPhase}
             data-wall-handoff-mode={handoffSession?.mode}
@@ -139,25 +226,62 @@ export default function Lattice({
                 '--lattice-poster-tint-color': posterTintColor,
                 '--lattice-poster-tint-intensity': posterTintIntensity,
             } as CSSProperties}
-            aria-label={t('home.latticeLabel')}
+            aria-label={t(isExplore ? 'home.latticeExplore' : isRadio ? (isFm ? 'home.latticeRadioLabel' : 'home.latticeRadioQueueLabel') : 'home.latticeLabel')}
+            {...{ [LATTICE_WALL_ATTR]: '' }}
         >
-            <PosterWall
+            {isRadio ? (
+                <RadioWall
+                    tiles={queueTiles}
+                    isFm={isFm}
+                    // Personal FM's next songs are the radio's to reveal; a plain queue's only when the setting asks.
+                    hidesUpcoming={isFm || radioHidesUpcoming}
+                    // List loop: the cards after the last song go on from the head of the queue, as playback does.
+                    wrapsAround={!isFm && controls.loopMode === 'all'}
+                    onPlay={wall.onPlay}
+                    onPlayFromWall={wall.onPlayFromWall}
+                    onTogglePlayback={wall.onTogglePlayback}
+                    onSeek={wall.onSeek}
+                    onOpenPlayer={wall.onOpenPlayer}
+                    onBack={onBack}
+                />
+            ) : <PosterWall
                 tiles={tiles}
+                sections={isExplore ? explore.sections : undefined}
+                startTileId={startTileId}
                 currentSong={currentSong}
                 onPlay={wall.onPlay}
+                onPlayFromWall={wall.onPlayFromWall}
                 onTogglePlayback={wall.onTogglePlayback}
                 onSeek={wall.onSeek}
                 onOpenPlayer={wall.onOpenPlayer}
                 onBack={onBack}
-            />
-            <LatticeFocusButton isDaylight={isDaylight} onGoHome={onGoHome} />
+            />}
+            <WallTripLog isReturn={isReturn} />
+            <LatticeFocusButton isDaylight={isDaylight} tiles={tiles} isRadio={isRadio} showsWallForm={!isExplore} onGoHome={onGoHome} />
             <WallBackButton label={t('home.latticeBack')} onBack={onBack} />
-            {tiles.length === 0 && (
+            {/* The explore page's own control, beside the way back: other entries take the tiles' places. */}
+            {isExplore && (
+                // A press with the mouse leaves the focus where it is: the wall's arrow keys and Escape
+                // are handled on .lattice-field, and reach it only while the focus is inside it. From
+                // the keyboard the button is reached and pressed as any other, and holds the focus
+                // then: so `aria-disabled` and not `disabled` (a disabled button cannot hold the focus).
+                <button type="button" className="lattice-back lattice-refresh" aria-disabled={!explore.canRefresh}
+                    onMouseDown={event => event.preventDefault()}
+                    onClick={() => { if (explore.canRefresh) explore.refresh(); }}
+                    aria-label={t('home.exploreRefresh')} title={t('home.exploreRefresh')}>
+                    <RefreshCw size={18} className={explore.isRefreshing ? 'animate-spin' : ''} />
+                </button>
+            )}
+            {tiles.length === 0 && (isExplore ? explore.emptyText && (
+                <div className="lattice-empty">
+                    <strong>{t(explore.emptyText)}</strong>
+                </div>
+            ) : (
                 <div className="lattice-empty">
                     <strong>{t('home.latticeEmptyTitle')}</strong>
                     <span>{t('home.latticeEmptyText')}</span>
                 </div>
-            )}
+            ))}
         </section>
         </LatticeLyricsProvider>
         </LatticePlaybackProvider>

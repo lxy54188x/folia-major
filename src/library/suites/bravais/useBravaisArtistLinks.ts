@@ -1,9 +1,9 @@
 import { useMemo, useRef } from 'react';
 import type { SongResult } from '../../../types';
-import type { LibraryArtistAlbum } from '../../core/contracts/artist';
-import type { LibraryArtistSurfaceProps } from '../../core/contracts/suite';
-import type { ArtistView } from '../../core/bindings/useArtistView';
-import { resolveTrackAlbumLink, resolveTrackArtistLinks } from '../../core/model/trackLinks';
+import type { LibraryArtistAlbum } from '../../core/artist/artist.contract';
+import type { LibraryArtistSurfaceProps } from '../../core/suite/suite.contract';
+import type { ArtistView } from '../../core/artist/useArtistView';
+import { resolveTrackAlbumLink, resolveTrackArtistLinks } from '../../core/shared/trackLinks';
 import { canResolveSongCatalogRef } from '../../../services/onlineMusic/catalogRefs';
 import type { useBravaisSessionFocus } from './useBravaisSessionFocus';
 
@@ -90,6 +90,7 @@ export const useBravaisArtistLinks = (input: BravaisArtistLinksInput) => {
             onBack: () => latest.current.onBack(),
             onDone: () => latest.current.onDone(),
             onPlayScope: () => latest.current.view.actions.playScope(),
+            onShuffleScope: () => latest.current.view.actions.shuffleScope(),
             onEnqueueScope: () => {
                 latest.current.view.actions.enqueueScope();
             },

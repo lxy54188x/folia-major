@@ -1,20 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { LibraryDirectoryBatchConfig, LibraryHiddenScope } from '../../core/contracts/directory';
-import type { LibraryHomeCard } from '../../core/contracts/homeModel';
-import type { LibraryDeclaredActions } from '../../core/contracts/suite';
-import type { LibraryHomeCardSource } from '../../core/model/homeSpecialCards';
-import { isHideableDirectoryItem } from '../../core/model/directoryVisibility';
-import { useLibraryDirectorySessionStore } from '../../core/state/useLibraryDirectorySessionStore';
-import { useLibraryDirectoryQuery } from '../../core/bindings/useLibraryDirectoryQuery';
-import { useLibraryDirectorySelection } from '../../core/bindings/useLibraryDirectorySelection';
-import { useLibraryDirectoryVisibility } from '../../core/bindings/useLibraryDirectoryVisibility';
-import { useLibraryDirectoryScope } from '../../core/bindings/useLibraryDirectoryScope';
-import { useLibraryDirectoryActions } from '../../core/bindings/useLibraryDirectoryActions';
-import { useHiddenCollections } from '../../core/bindings/useHiddenCollections';
+import type { LibraryDirectoryBatchConfig, LibraryHiddenScope } from '../../core/directory/directory.contract';
+import type { LibraryHomeCard } from '../../core/home/homeModel.contract';
+import type { LibraryDeclaredActions } from '../../core/suite/suite.contract';
+import type { LibraryHomeCardSource } from '../../core/home/homeSpecialCards';
+import { isHideableDirectoryItem } from '../../core/directory/directoryVisibility';
+import { useLibraryDirectorySessionStore } from '../../core/directory/useLibraryDirectorySessionStore';
+import { useLibraryDirectoryQuery } from '../../core/directory/useLibraryDirectoryQuery';
+import { useLibraryDirectorySelection } from '../../core/directory/useLibraryDirectorySelection';
+import { useLibraryDirectoryVisibility } from '../../core/directory/useLibraryDirectoryVisibility';
+import { useLibraryDirectoryScope } from '../../core/directory/useLibraryDirectoryScope';
+import { useLibraryDirectoryActions } from '../../core/directory/useLibraryDirectoryActions';
+import { useHiddenCollections } from '../../core/collection/useHiddenCollections';
 import type { BravaisItemKind, BravaisLayer, BravaisSeamModel } from './bravaisLayer';
 import type { BravaisHomeAccount, BravaisHomeSection, BravaisHomeShortcut, BravaisHomeTool } from './bravaisHomeModels';
-import type { BravaisLayerEntries, BravaisSeamFilter, BravaisSeamMenuItem } from './bravaisSeamModels';
+import type { BravaisLayerEntries, BravaisSeamFilter, BravaisSeamMenuItem, BravaisWallHint } from './bravaisSeamModels';
 import { createHomeItemCache, projectHomeShortcuts, projectHomeWallItems, resolveHomeWallMode, toHomeEntry } from './bravaisHomeProjection';
 import type { BravaisHomeChrome } from './useBravaisHomeChrome';
 import { useBravaisDirectoryPanel } from './useBravaisDirectoryPanel';
@@ -24,10 +24,13 @@ import { useBravaisUiStore } from './bravaisUiStore';
 import { openBravaisFilter, useBravaisSeamFilter } from './useBravaisSeamFilter';
 import { closeBravaisPanel, openBravaisPanel } from './bravaisPanelHistory';
 import { useBravaisSeamStore } from './bravaisSeamLevel';
+import { useLibraryWallLookStore } from '../../../stores/useLibraryWallLookStore';
 
 // src/library/suites/bravais/BravaisHomeDirectory.tsx
 // 首页一个来源的墙（设计稿 §10.5）：当前页签 / section 的卡片就是一个目录（与 GridMap、TUI 读写同一份目录会话：
 // 隐藏视图、批选、目录过滤，换 suite 不丢），投影成首页层推进 stage。墙一直是这个目录（显示它就 openDirectory 它）。
+// - 设置「首页只用有限墙」（useLibraryWallLookStore 的 homeFinite）开着、来源有卡片时，下面各处的无限拼贴都换成以缝为中心的
+//   有限拼贴（探索页签不是这个组件，版面照旧，见 BravaisHomeExplore）。
 // - 浏览：去掉隐藏的，无限拼贴；歌单类磁贴悬停右上角有眼睛按钮（隐藏后那一格翻成墙面、后面的 rank 前移）。
 // - 管理隐藏（视图模式，不是导航）：整面翻牌，已隐藏的也翻上来、灰度 + 半透明，眼睛按钮常驻、原地变色不重排；
 //   「只看隐藏」退化为有限拼贴；退出整面翻回浏览。
@@ -50,6 +53,7 @@ const KIND_LABEL_KEYS: Record<BravaisItemKind, string> = {
     artist: 'libraryBravais.kind.artist',
     folder: 'libraryBravais.kind.folder',
     feed: 'libraryBravais.kind.feed',
+    tag: 'libraryBravais.kind.tag',
 };
 
 export type BravaisHomeDirectoryProps = {
@@ -67,6 +71,8 @@ export type BravaisHomeDirectoryProps = {
     isLoading: boolean;
     /** 没有卡片时缝里的说明（登录过期、未配置、空曲库、空列表）；fb3：未登录时不给（缝里只有「连接在线平台」入口）。 */
     emptyMessage?: string;
+    /** 没有卡片、又是因为还没连在线平台 / 还没导入本地文件夹时，墙面上的背景说明（bravaisEmptyWallHint）。 */
+    wallHint?: BravaisWallHint;
     /** 缝的元数据行（来源）。 */
     meta: string;
     sections?: readonly BravaisHomeSection[];
@@ -88,6 +94,8 @@ export type BravaisHomeDirectoryProps = {
     shortcutCards?: readonly LibraryHomeCard[];
     /** 不经墙打开直达入口的那张卡（不给就是 onOpen；Navidrome 要按卡片自己的 section 定集合类型）。 */
     openShortcut?: (card: LibraryHomeCard) => void;
+    /** 一直是有限墙（不循环重复，拖到尽头停住）：首页 Folia 的标签页签（用户定，和歌单墙区分开）。 */
+    bounded?: boolean;
 };
 
 const never = () => false;
@@ -102,6 +110,7 @@ const BravaisHomeDirectory: React.FC<BravaisHomeDirectoryProps> = ({
     items,
     isLoading,
     emptyMessage,
+    wallHint,
     meta,
     sections,
     onSelectSection,
@@ -116,6 +125,7 @@ const BravaisHomeDirectory: React.FC<BravaisHomeDirectoryProps> = ({
     isDirect = never,
     shortcutCards,
     openShortcut,
+    bounded = false,
 }) => {
     const { t } = useTranslation();
 
@@ -149,7 +159,7 @@ const BravaisHomeDirectory: React.FC<BravaisHomeDirectoryProps> = ({
     const { visibilityMode, setVisibilityMode, toggleManageHidden, toggleHiddenOnly } = useLibraryDirectoryVisibility(directoryKey);
     const { hiddenIds, toggleHidden } = useHiddenCollections(hiddenScope);
 
-    // 关面板 = 退出批量模式：丢掉选择（过滤词是这一页的，留着），墙翻回无限拼贴（还有过滤词时是有限拼贴）。
+    // 关面板 = 退出批量模式：丢掉选择（过滤词是这一页的，留着），墙翻回无限拼贴（还有过滤词、或开着「首页只用有限墙」时是有限拼贴）。
     const panelOpenRef = useRef(panelOpen);
     useEffect(() => {
         const wasOpen = panelOpenRef.current;
@@ -231,13 +241,19 @@ const BravaisHomeDirectory: React.FC<BravaisHomeDirectoryProps> = ({
         isDirect: card => isDirectRef.current(card),
         source,
     }, labels, cacheRef.current), [displayItems, hiddenIds, labels, panelOpen, selectedIds, source, visibilityMode]);
-    const { mode, filterKey } = resolveHomeWallMode({ section, visibilityMode, batch: panelOpen, query: effectiveQuery });
+    // 「首页只用有限墙」只在来源有卡片时生效：加载中、没登录、没导入时仍是无限墙，空 slot 画成空画框（有限墙的空 slot 在
+    // 透明档是窗，见 bravaisLook 的 resolveEmptySlotKind，加载期间整面墙会透成一片、也没有加载的呼吸）。卡片到了再翻成有限墙。
+    // 一直是有限墙的页（bounded，首页 Folia 的标签页签）同一条规则，只是不看开关。
+    const homeFinite = useLibraryWallLookStore(state => state.homeFinite);
+    const finiteOnly = (homeFinite || bounded) && items.length > 0;
+    const { mode, filterKey } = resolveHomeWallMode({ section, visibilityMode, batch: panelOpen, query: effectiveQuery, finiteOnly });
     const planCount = mode === 'finite' ? visibleItems.length : undefined;
     const wall = useMemo(() => ({
         filterKey,
         planCount,
         loading: isLoading && items.length === 0,
-    }), [filterKey, isLoading, items.length, planCount]);
+        hint: items.length === 0 ? wallHint : undefined,
+    }), [filterKey, isLoading, items.length, planCount, wallHint]);
 
     // 回调执行时读最新的映射（身份稳定，层描述不因它们换身份）。
     const latest = useRef({ displayItems, onOpen, toggleHidden, openShortcut });
@@ -321,6 +337,7 @@ const BravaisHomeDirectory: React.FC<BravaisHomeDirectoryProps> = ({
             tools,
             menu,
             menuLabel: t('libraryBravaisHome.more'),
+            pageToolsLabel: t('libraryBravaisHome.pageTools'),
             manage,
             scan: chrome.scan,
             search: chrome.search,

@@ -1,9 +1,21 @@
 import type {
+    ModClearCacheResult,
+    ModClearSourceDataResult,
+    ModSourceDataResult,
+    ModSourceUsageResult,
+    ModSourceState,
+    ModSourceStatesPayload,
     ModFfmpegStatus,
     ModLogEntry,
+    ModMainCallStats,
+    ModMarketCatalogResult,
+    ModMarketProgress,
+    ModRpcMessage,
     ModRuntimeInfo,
     ModRuntimeSnapshot,
+    ModSecretChange,
     ModSetEnabledResult,
+    ModStorageUsageResult,
     ModsListPayload,
     ModExportProgress,
 } from './types';
@@ -21,6 +33,7 @@ const EMPTY_PAYLOAD: ModsListPayload = {
     mods: [],
     ffmpeg: { available: false, path: null, version: null, candidates: [] },
     directories: [],
+    startSkipped: false,
 };
 
 export const listMods = async (): Promise<ModsListPayload> => {
@@ -34,9 +47,45 @@ export const listMods = async (): Promise<ModsListPayload> => {
             mods: Array.isArray(payload?.mods) ? payload.mods : [],
             ffmpeg: payload?.ffmpeg ?? EMPTY_PAYLOAD.ffmpeg,
             directories: Array.isArray(payload?.directories) ? payload.directories : [],
+            startSkipped: payload?.startSkipped === true,
         };
     } catch {
         return EMPTY_PAYLOAD;
+    }
+};
+
+/** What the main-process gate counted for each mod's Node entry, by mod id; empty without the bridge. */
+export const getModCallStats = async (): Promise<Record<string, ModMainCallStats>> => {
+    try {
+        const response = await bridge()?.getModCallStats?.();
+        return response?.stats ?? {};
+    } catch {
+        return {};
+    }
+};
+
+/**
+ * Tells the main process that this window's start has ended: every client's start has returned
+ * and the first screen is up. The start note is taken up on it (electron/modSystem/safeStart.cjs).
+ */
+export const reportModsStartSettled = async (): Promise<void> => {
+    try {
+        await bridge()?.reportModsStartSettled?.();
+    } catch {
+        // The note then stays, and the next start asks once: the safe side.
+    }
+};
+
+/**
+ * Tells the main process that this window's page is answering while its start is under way. If
+ * the app is left the normal way before the start has ended, the start note is taken up only when
+ * this was heard a moment before: a page stuck on a mod cannot say it.
+ */
+export const reportModsStartAlive = async (): Promise<void> => {
+    try {
+        await bridge()?.reportModsStartAlive?.();
+    } catch {
+        // Nothing to do here: the main process goes by what it heard last.
     }
 };
 
@@ -82,6 +131,19 @@ export const invokeModStorage = async (
     value?: unknown,
 ): Promise<{ ok: boolean; result?: unknown; error?: string }> =>
     bridge()?.invokeModStorage(modId, operation, key, value) ?? { ok: false, error: 'no-electron-bridge' };
+
+/**
+ * Folium 1.7: a mod's `secret` settings values, kept in the main process (electron/modSystem/modSecrets.cjs).
+ * `declare` passes the `secret` keys of a settings section the mod registered (`key` is the list);
+ * `state` answers a ModSecretsState.
+ */
+export const invokeModSecrets = async (
+    modId: string,
+    operation: 'get' | 'has' | 'set' | 'declare' | 'state',
+    key?: string | readonly string[],
+    value?: string | null,
+): Promise<{ ok: boolean; result?: unknown; error?: string }> =>
+    bridge()?.invokeModSecrets(modId, operation, key, value) ?? { ok: false, error: 'no-electron-bridge' };
 
 /** folium.net.fetch: runs in the main process (permission `net.fetch`). */
 export const invokeModNetFetch = async (
@@ -147,6 +209,24 @@ export const installModFromZip = async (
     return response ?? { ok: false, error: 'no-electron-bridge' };
 };
 
+/** Installs a mod from a .zip the main process asks the user for (Settings → Sources). */
+export const installModFromPickedZip = async (): Promise<{ ok: boolean; id?: string; error?: string }> => {
+    const response = await bridge()?.installModFromPickedZip?.();
+    return response ?? { ok: false, error: 'no-electron-bridge' };
+};
+
+/** Bytes a mod keeps on disk (data and cache); disabled mods included, broken entries refused. */
+export const getModStorageUsage = async (modId: string): Promise<ModStorageUsageResult> => {
+    const response = await bridge()?.getModStorageUsage(modId);
+    return response ?? { ok: false, error: 'no-electron-bridge' };
+};
+
+/** Empties a mod's cache directory (`api.storage.paths.cache`); the directory itself stays. */
+export const clearModCache = async (modId: string): Promise<ModClearCacheResult> => {
+    const response = await bridge()?.clearModCache(modId);
+    return response ?? { ok: false, error: 'no-electron-bridge' };
+};
+
 export const subscribeModsState = (callback: (mods: ModRuntimeInfo[]) => void): (() => void) =>
     bridge()?.onModsStateChanged(callback) ?? (() => {});
 
@@ -156,3 +236,149 @@ export const subscribeExportProgress = (callback: (progress: ModExportProgress) 
 export const subscribeModLogs = (callback: (entry: ModLogEntry) => void): (() => void) =>
     bridge()?.onModLog(callback) ?? (() => {});
 
+/** Messages main entries push with `api.rpc.send`; folium/rpcMessages.ts hands each to its own mod. */
+export const subscribeModRpcMessages = (callback: (message: ModRpcMessage) => void): (() => void) =>
+    bridge()?.onModRpcMessage?.(callback) ?? (() => {});
+
+/** Folium 1.7: a mod's `secret` value was saved or cleared, by anyone; the key only. */
+export const subscribeModSecretChanges = (callback: (change: ModSecretChange) => void): (() => void) =>
+    bridge()?.onModSecretChanged?.(callback) ?? (() => {});
+
+// ---- Folium 2.0 (plan §5.3): the sources' states. "Settings → Sources" (S8) is drawn on these. ----
+
+type SourceStatesAnswer = ModSourceStatesPayload & {
+    hasSourceMods: boolean;
+    /** A fresh profile still owes the start prompt's sources page (never in the web build). */
+    sourcesOnboarding: boolean;
+};
+
+const EMPTY_SOURCE_STATES: SourceStatesAnswer = { states: {}, sources: [], hasSourceMods: false, sourcesOnboarding: false };
+
+/**
+ * Every known source's state and row, whether a source mod runs, and whether the start prompt still owes its sources
+ * page; empty without the bridge (the web build: every source enabled, nothing owed). It answers while the start
+ * question is still open.
+ */
+export const getSourceStates = async (): Promise<SourceStatesAnswer> => {
+    try {
+        const response = await bridge()?.getSourceStates?.();
+        if (!response?.ok) return EMPTY_SOURCE_STATES;
+        return {
+            states: response.states ?? {},
+            sources: Array.isArray(response.sources) ? response.sources : [],
+            hasSourceMods: response.hasSourceMods === true,
+            sourcesOnboarding: response.sourcesOnboarding === true,
+        };
+    } catch {
+        return EMPTY_SOURCE_STATES;
+    }
+};
+
+/** Switches one source; only its own mod reloads. Callers go through runtime/sourceSwitches.ts, which stops its playback first. */
+export const invokeSetSourceState = async (
+    sourceId: string,
+    state: ModSourceState,
+): Promise<{ ok: boolean; error?: string } & Partial<ModSourceStatesPayload>> => (
+    await bridge()?.setSourceState?.(sourceId, state) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/**
+ * The start prompt's sources page, answered once: the state of each built-in source. The main process checks every
+ * entry, writes them all, records the page as answered and reloads only what changed.
+ */
+export const invokeAnswerSourcesOnboarding = async (
+    choices: Record<string, ModSourceState>,
+): Promise<{ ok: boolean; error?: string } & Partial<ModSourceStatesPayload>> => (
+    await bridge()?.answerSourcesOnboarding?.(choices) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** What "clear data" of a source would remove. */
+export const describeSourceData = async (sourceId: string): Promise<ModSourceDataResult> => (
+    await bridge()?.describeSourceData?.(sourceId) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** How much one source keeps on disk (data and cache), measured in the main process. */
+export const getSourceStorageUsage = async (sourceId: string): Promise<ModSourceUsageResult> => (
+    await bridge()?.getSourceStorageUsage?.(sourceId) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** The main process's half of "clear data"; the window's own storage is runtime/sourceSwitches.ts's. */
+export const invokeClearSourceData = async (sourceId: string): Promise<ModClearSourceDataResult> => (
+    await bridge()?.clearSourceData?.(sourceId) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** The one confirmation of an override of a built-in mod (a dialog in the main process). */
+export const confirmModOverride = async (modId: string): Promise<{ ok: boolean; error?: string; mods?: ModRuntimeInfo[] }> => (
+    await bridge()?.confirmModOverride?.(modId) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** Hands a taken-over short source id to another mod that claims it. */
+export const assignSourceClaim = async (shortId: string, modId: string): Promise<{ ok: boolean; error?: string; mods?: ModRuntimeInfo[] }> => (
+    await bridge()?.assignSourceClaim?.(shortId, modId) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/**
+ * Folium 2.0 (S3): which of a source mod's declared sources its client registered once `activate` ended (their
+ * manifest ids), naming the client copy by its URL. None at all takes the source exemptions back from that running
+ * copy, and only from it (plan §5.2).
+ */
+export const reportFoliumSourcesRegistered = async (
+    modId: string,
+    registered: string[],
+    clientUrl: string,
+): Promise<{ ok: boolean; error?: string; revoked?: boolean }> => (
+    await bridge()?.reportSourcesRegistered?.(modId, registered, clientUrl) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** The main process is about to unload these sources (any reload path): their playback stops first. */
+export const subscribeSourcesStopping = (callback: (payload: { sourceIds: string[] }) => void): (() => void) =>
+    bridge()?.onSourcesStopping?.(callback) ?? (() => {});
+
+/** The sources' states changed (a switch, a load). */
+export const subscribeSourceStates = (callback: (payload: ModSourceStatesPayload) => void): (() => void) =>
+    bridge()?.onSourceStatesChanged?.(callback) ?? (() => {});
+
+// ---- Folium 2.1: uninstall, loading past an expired `folia` range, and the mod market (market.cjs). ----
+
+type ModsAnswer = { ok: boolean; error?: string; mods?: ModRuntimeInfo[] };
+
+/** Moves a mod of the user mods folder to the trash after a native confirmation. */
+export const uninstallMod = async (modId: string): Promise<ModsAnswer> => (
+    await bridge()?.uninstallMod?.(modId) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** Lets mods whose `folia` range only ran out above load anyway (one native confirmation for all of them). */
+export const allowExpiredModRange = async (modIds: string[]): Promise<ModsAnswer> => (
+    await bridge()?.allowExpiredModRange?.(modIds) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** Takes that back for one mod: it stops and shows its expired range again. */
+export const revokeExpiredModRange = async (modId: string): Promise<ModsAnswer> => (
+    await bridge()?.revokeExpiredModRange?.(modId) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+/** The market catalog, kept by the main process for ten minutes (`force` reads it again). */
+export const getMarketCatalog = async (options?: { force?: boolean }): Promise<ModMarketCatalogResult> => {
+    try {
+        return await bridge()?.getMarketCatalog?.(options) ?? { ok: false, error: 'no-electron-bridge' };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+};
+
+/** A mod's README text; the URL must be one the catalog gave (the main process checks it is the market's). */
+export const getMarketReadme = async (url: string): Promise<{ ok: boolean; text?: string; error?: string }> => {
+    try {
+        return await bridge()?.getMarketReadme?.(url) ?? { ok: false, error: 'no-electron-bridge' };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+};
+
+/** Installs or updates a mod from the market: the main process downloads, checks and installs the catalog's version. */
+export const installFromMarket = async (modId: string): Promise<{ ok: boolean; id?: string; error?: string; mods?: ModRuntimeInfo[] }> => (
+    await bridge()?.installFromMarket?.(modId) ?? { ok: false, error: 'no-electron-bridge' }
+);
+
+export const subscribeMarketProgress = (callback: (progress: ModMarketProgress) => void): (() => void) =>
+    bridge()?.onMarketProgress?.(callback) ?? (() => {});

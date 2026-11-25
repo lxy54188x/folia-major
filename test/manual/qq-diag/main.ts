@@ -4,7 +4,7 @@ import {
     probeQqPlaylists,
     type QqPlaylistDetailProbe,
     type QqPlaylistProbeEntry,
-} from '../../../src/services/onlineMusic/qqPlaylistDiagnostics';
+} from './qqPlaylistDiagnostics';
 
 // test/manual/qq-diag/main.ts
 

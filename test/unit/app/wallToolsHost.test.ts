@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SongResult } from '../../../src/types';
+import { closeSettings, useSettingsModalStore } from '../../../src/stores/useSettingsModalStore';
 import {
     WALL_TOOLS_SHUFFLE_COMMAND,
     WALL_TOOLS_THEME_COMMAND,
@@ -32,7 +33,7 @@ const makeDeps = (overrides: Partial<WallToolsHostDeps> = {}): WallToolsHostDeps
     removeQueueSong: vi.fn(),
     moveQueueSong: vi.fn(),
     clearQueue: vi.fn(),
-    saveCurrentQueueAsLocalPlaylist: vi.fn(async () => {}),
+    saveCurrentQueueAsPlaylist: vi.fn(async () => {}),
     ...overrides,
 });
 
@@ -90,11 +91,21 @@ describe('createWallToolsHostStore', () => {
         expect(deps.moveQueueSong).toHaveBeenCalledWith(4, 0);
         expect(deps.clearQueue).toHaveBeenCalledTimes(1);
         await host.saveQueueAsPlaylist('Mix');
-        expect(deps.saveCurrentQueueAsLocalPlaylist).toHaveBeenCalledWith('Mix');
+        expect(deps.saveCurrentQueueAsPlaylist).toHaveBeenCalledWith('Mix');
+    });
+
+    it('opens the settings dialog on its options tab', () => {
+        const { host } = createWallToolsHostStore({ current: makeDeps() });
+        closeSettings();
+        host.openSettings();
+        const state = useSettingsModalStore.getState().settingsModalState;
+        expect(state.isOpen).toBe(true);
+        expect(state.initialTab).toBe('options');
+        closeSettings();
     });
 
     it('passes a failed save through as a rejection', async () => {
-        const deps = makeDeps({ saveCurrentQueueAsLocalPlaylist: vi.fn(async () => { throw new Error('nope'); }) });
+        const deps = makeDeps({ saveCurrentQueueAsPlaylist: vi.fn(async () => { throw new Error('nope'); }) });
         const { host } = createWallToolsHostStore({ current: deps });
         await expect(host.saveQueueAsPlaylist('Mix')).rejects.toThrow('nope');
     });
